@@ -82,6 +82,12 @@ func init() {
 		return err == nil
 	}
 
+	antigravityGlobalSkillsDir := filepath.Join(home, ".gemini/antigravity/skills")
+	if exists(filepath.Join(home, ".gemini/config")) {
+		antigravityGlobalSkillsDir = filepath.Join(home, ".gemini/config/skills")
+	}
+
+
 	getOpenClawGlobalSkillsDir := func() string {
 		if exists(filepath.Join(home, ".openclaw")) {
 			return filepath.Join(home, ".openclaw/skills")
@@ -121,10 +127,10 @@ func init() {
 			Name:                "antigravity",
 			DisplayName:         "Antigravity",
 			SkillsDir:           ".agents/skills",
-			GlobalSkillsDir:     filepath.Join(home, ".gemini/antigravity/skills"),
+			GlobalSkillsDir:     antigravityGlobalSkillsDir,
 			ShowInUniversalList: true,
 			DetectInstalled: func(h, c, w string) bool {
-				return exists(filepath.Join(h, ".gemini/antigravity"))
+				return exists(filepath.Join(h, ".gemini/antigravity")) || exists(filepath.Join(h, ".gemini/config"))
 			},
 		},
 		"augment": {

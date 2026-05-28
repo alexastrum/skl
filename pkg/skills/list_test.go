@@ -167,6 +167,13 @@ description: A mock skill
 
 func TestListInstalledSkills_AgentsMapping(t *testing.T) {
 	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	// Mock antigravity installation folder
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".gemini", "antigravity"), 0755); err != nil {
+		t.Fatalf("failed to create mock antigravity folder: %v", err)
+	}
 
 	// Create a skill inside `.agents/skills`
 	skillDir := filepath.Join(tmpDir, ".agents", "skills", "multi-agent-skill")
