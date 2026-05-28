@@ -84,7 +84,7 @@ func AddSkill(src string, opts AddOptions, cwd string) error {
 
 		tempDir, err := downloadRemote(repoURL, ref, opts)
 		if err != nil {
-			return fmt.Errorf("failed to download remote repository: %w", err)
+			return fmt.Errorf("download remote: %w", err)
 		}
 		localSrc = tempDir
 		isTemp = true
