@@ -118,3 +118,13 @@ Every input skill name is sanitized using `SanitizeName()`. This replaces specia
 
 ### Shared skill deduplication
 To save disk space and avoid cloning identical git repositories multiple times, skills are downloaded once to a shared directory (`.agents/skills/<skill-name>`) and then symlinked into each agent's active scope. When you remove a skill from a specific agent, the CLI doesn't blindly delete the shared source files. Instead, it checks active references across all configured agents in the workspace, only deleting the physical repository files when the last agent stops using it. This prevents breaking other active agents that still depend on those symlinks.
+
+### Agent autodetection
+You don't need to manually configure which agents you are running. When you add, list, or update skills, `skl` automatically crawls standard locations to detect active environments:
+*   **Project-level detection**: Scans the current working directory for active agent folders (such as `.cursor/`, `.claude/`, `.cline/`, or `.zed/`). If present, those agents are targeted for local workspace actions.
+*   **Global environment detection**: Leverages platform-specific standard paths (like `~/.config`, `$XDG_CONFIG_HOME`, or `%APPDATA%` on Windows) to discover active installations of editors and developer assistants.
+
+### Scope autodetection
+When running non-interactively with `-y` or `--yes`, the CLI automatically resolves the installation scope:
+*   If your current working directory contains an active project or initialized agent folders, it installs to the **project scope** (`./.agents/skills/`).
+*   If no local project environment is detected, it falls back to the **global scope** (`~/.gemini/antigravity/skills/` or equivalent).
