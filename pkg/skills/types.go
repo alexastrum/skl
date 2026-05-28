@@ -701,11 +701,14 @@ type ListOptions struct {
 
 // AddOptions contains options for the add command.
 type AddOptions struct {
-	Global  bool
-	Copy    bool
-	Agent   []AgentType
-	Verbose bool
-	Yes     bool
+	Global    bool
+	Copy      bool
+	Agent     []AgentType
+	Verbose   bool
+	Yes       bool
+	Skill     []string
+	List      bool
+	FullDepth bool
 }
 
 // DetectInstalledAgents checks environment and folders to find installed agents.

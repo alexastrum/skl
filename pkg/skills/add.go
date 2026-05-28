@@ -28,11 +28,31 @@ func ParseAddOptions(args []string) (string, AddOptions) {
 			opts.Verbose = true
 		} else if arg == "-y" || arg == "--yes" {
 			opts.Yes = true
+		} else if arg == "-l" || arg == "--list" {
+			opts.List = true
+		} else if arg == "--full-depth" {
+			opts.FullDepth = true
+		} else if arg == "-s" || arg == "--skill" {
+			if i+1 < len(args) {
+				i++
+				parts := strings.Split(args[i], ",")
+				for _, part := range parts {
+					trimmed := strings.TrimSpace(part)
+					if trimmed != "" {
+						opts.Skill = append(opts.Skill, trimmed)
+					}
+				}
+			}
 		} else if arg == "-a" || arg == "--agent" {
 			if i+1 < len(args) {
 				i++
-				agentStr := args[i]
-				opts.Agent = append(opts.Agent, AgentType(agentStr))
+				parts := strings.Split(args[i], ",")
+				for _, part := range parts {
+					trimmed := strings.TrimSpace(part)
+					if trimmed != "" {
+						opts.Agent = append(opts.Agent, AgentType(trimmed))
+					}
+				}
 			}
 		} else if !strings.HasPrefix(arg, "-") {
 			source = arg
@@ -55,14 +75,14 @@ func AddSkill(src string, opts AddOptions, cwd string) error {
 	var targetSkillName = ""
 
 	if isGitRepoSource(src) {
-		repoURL, skillName := parseRemoteSource(src)
+		repoURL, ref, skillName := parseRemoteSource(src)
 		targetSkillName = skillName
 
 		if opts.Verbose {
-			fmt.Printf("🌐 Remote: %s (target: %s)\n", repoURL, targetSkillName)
+			fmt.Printf("🌐 Remote: %s (ref: %s, target: %s)\n", repoURL, ref, targetSkillName)
 		}
 
-		tempDir, err := downloadRemote(repoURL, opts)
+		tempDir, err := downloadRemote(repoURL, ref, opts)
 		if err != nil {
 			return fmt.Errorf("failed to download remote repository: %w", err)
 		}
@@ -79,13 +99,13 @@ func AddSkill(src string, opts AddOptions, cwd string) error {
 		}()
 	}
 
-	// Find all subdirectories that contain a SKILL.md (depth limit of 2 applied inside findSkillDirectories)
-	skillDirs := findSkillDirectories(localSrc)
+	// Find all subdirectories that contain a SKILL.md
+	skillDirs := findSkillDirectories(localSrc, opts.FullDepth)
 	if len(skillDirs) == 0 {
 		return fmt.Errorf("no skills (directories containing SKILL.md) found in source %q", src)
 	}
 
-	// Filter down by targetSkillName if provided
+	// Filter down by targetSkillName or opts.Skill if provided
 	var matchedDirs []string
 	for _, dir := range skillDirs {
 		skillMdPath := filepath.Join(dir, "SKILL.md")
@@ -99,11 +119,23 @@ func AddSkill(src string, opts AddOptions, cwd string) error {
 		}
 		name, _ := data["name"].(string)
 
+		matches := false
 		if targetSkillName != "" {
 			if strings.ToLower(name) == strings.ToLower(targetSkillName) || strings.ToLower(filepath.Base(dir)) == strings.ToLower(targetSkillName) {
-				matchedDirs = append(matchedDirs, dir)
+				matches = true
+			}
+		} else if len(opts.Skill) > 0 {
+			for _, filterSkill := range opts.Skill {
+				if strings.ToLower(name) == strings.ToLower(filterSkill) || strings.ToLower(filepath.Base(dir)) == strings.ToLower(filterSkill) {
+					matches = true
+					break
+				}
 			}
 		} else {
+			matches = true
+		}
+
+		if matches {
 			matchedDirs = append(matchedDirs, dir)
 		}
 	}
@@ -113,6 +145,24 @@ func AddSkill(src string, opts AddOptions, cwd string) error {
 			return fmt.Errorf("skill %q not found in source", targetSkillName)
 		}
 		return errors.New("no valid skills found in source")
+	}
+
+	if opts.List {
+		for _, dir := range matchedDirs {
+			skillMdPath := filepath.Join(dir, "SKILL.md")
+			bytes, err := os.ReadFile(skillMdPath)
+			if err != nil {
+				continue
+			}
+			data, _, err := ParseFrontmatter(string(bytes))
+			if err != nil {
+				continue
+			}
+			name, _ := data["name"].(string)
+			desc, _ := data["description"].(string)
+			fmt.Printf("- %s: %s (path: %s)\n", name, desc, dir)
+		}
+		return nil
 	}
 
 	if cwd == "" {
@@ -266,10 +316,15 @@ func isGitRepoSource(src string) bool {
 	return false
 }
 
-func parseRemoteSource(src string) (repoURL string, skillName string) {
+func parseRemoteSource(src string) (repoURL string, ref string, skillName string) {
 	if atIdx := strings.Index(src, "@"); atIdx > 0 {
 		skillName = src[atIdx+1:]
 		src = src[:atIdx]
+	}
+
+	if hashIdx := strings.Index(src, "#"); hashIdx > 0 {
+		ref = src[hashIdx+1:]
+		src = src[:hashIdx]
 	}
 
 	if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") || strings.HasPrefix(src, "git@") || strings.HasPrefix(src, "ssh://") {
@@ -281,7 +336,7 @@ func parseRemoteSource(src string) (repoURL string, skillName string) {
 	return
 }
 
-func downloadRemote(repoURL string, opts AddOptions) (string, error) {
+func downloadRemote(repoURL string, ref string, opts AddOptions) (string, error) {
 	verbose := opts.Verbose
 	tmpDir, err := os.MkdirTemp("", "skills-clone-")
 	if err != nil {
@@ -298,7 +353,12 @@ func downloadRemote(repoURL string, opts AddOptions) (string, error) {
 		if verbose {
 			fmt.Printf("📥 Cloning: %s\n", repoURL)
 		}
-		cmd := exec.Command("git", "clone", "--depth", "1", repoURL, tmpDir)
+		var cmd *exec.Cmd
+		if ref != "" {
+			cmd = exec.Command("git", "clone", "--depth", "1", "--branch", ref, repoURL, tmpDir)
+		} else {
+			cmd = exec.Command("git", "clone", "--depth", "1", repoURL, tmpDir)
+		}
 		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 		cloneErr = cmd.Run()
 		if cloneErr == nil {
@@ -319,8 +379,12 @@ func downloadRemote(repoURL string, opts AddOptions) (string, error) {
 	}
 
 	fmt.Println("ℹ️  Limitation: To proceed, we can attempt to download a public HTTP ZIP archive of the repository.")
-	fmt.Println("   - This only supports standard default branches ('main' or 'master').")
-	fmt.Println("   - This does NOT support private repositories or custom branches.")
+	if ref != "" {
+		fmt.Printf("   - Attempting to download ZIP archive for reference %q.\n", ref)
+	} else {
+		fmt.Println("   - This only supports standard default branches ('main' or 'master').")
+	}
+	fmt.Println("   - This does NOT support private repositories or custom branches (unless public ZIP is accessible).")
 	fmt.Println()
 
 	// Prompt/confirm if interactive
@@ -350,7 +414,11 @@ func downloadRemote(repoURL string, opts AddOptions) (string, error) {
 	zipURL := repoURL
 	if strings.Contains(repoURL, "github.com") {
 		cleanURL := strings.TrimSuffix(repoURL, ".git")
-		zipURL = cleanURL + "/archive/refs/heads/main.zip"
+		if ref != "" {
+			zipURL = fmt.Sprintf("%s/archive/%s.zip", cleanURL, ref)
+		} else {
+			zipURL = cleanURL + "/archive/refs/heads/main.zip"
+		}
 	}
 
 	if verbose {
@@ -364,7 +432,7 @@ func downloadRemote(repoURL string, opts AddOptions) (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		if strings.Contains(zipURL, "/refs/heads/main.zip") {
+		if ref == "" && strings.Contains(zipURL, "/refs/heads/main.zip") {
 			cleanURL := strings.TrimSuffix(repoURL, ".git")
 			zipURL = cleanURL + "/archive/refs/heads/master.zip"
 			if verbose {
@@ -447,7 +515,7 @@ func extractZip(body io.Reader, dest string, verbose bool) error {
 	return nil
 }
 
-func findSkillDirectories(dir string) []string {
+func findSkillDirectories(dir string, fullDepth bool) []string {
 	var results []string
 	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -458,11 +526,13 @@ func findSkillDirectories(dir string) []string {
 			if name == ".git" || name == "node_modules" {
 				return filepath.SkipDir
 			}
-			rel, err := filepath.Rel(dir, path)
-			if err == nil && rel != "." {
-				parts := strings.Split(filepath.ToSlash(rel), "/")
-				if len(parts) > 2 {
-					return filepath.SkipDir
+			if !fullDepth {
+				rel, err := filepath.Rel(dir, path)
+				if err == nil && rel != "." {
+					parts := strings.Split(filepath.ToSlash(rel), "/")
+					if len(parts) > 2 {
+						return filepath.SkipDir
+					}
 				}
 			}
 		} else if info.Name() == "SKILL.md" {
@@ -564,17 +634,7 @@ type InstallResult struct {
 }
 
 func getCanonicalSkillsDir(global bool, cwd string) string {
-	baseDir := cwd
-	if global {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			baseDir = home
-		}
-	}
-	if global {
-		return filepath.Join(baseDir, ".gemini", "antigravity", "skills")
-	}
-	return filepath.Join(baseDir, ".agents", "skills")
+	return GetCanonicalSkillsDir(global, cwd)
 }
 
 func getAgentBaseDir(agentType AgentType, global bool, cwd string) string {

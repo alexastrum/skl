@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/alexastrum/skl/pkg/skills"
@@ -19,21 +21,47 @@ Usage:
   skl <command> [arguments]
 
 Commands:
-  init [name]        Initialize a new agent skill template in Cwd or a subfolder.
-  add <source>       Install a local skill folder to project or global scope.
-  list               List installed skills for detected agents.
-  remove <names...>  Uninstall and delete skill configurations.
-  find <query>       Search/retrieve an installed skill by name or slug.
-  update <name> <src> Refresh an installed skill from its source path.
-  version            Print CLI tool version.
+  init [name]                      Initialize a new agent skill template in Cwd or a subfolder.
+  add <source>                     Install a local skill folder to project or global scope (aliases: a, i, install).
+  list                             List installed skills for detected agents (alias: ls).
+  remove <names...>                Uninstall and delete skill configurations (aliases: rm, r).
+  find <query>                     Search/retrieve an installed skill by name or slug (aliases: search, f, s).
+  update <name> [src]              Refresh installed skill(s) (aliases: check, upgrade).
+  config <set|get> <key> [value]   Configure settings (e.g. canonicalDir.global, canonicalDir.project).
+  experimental_sync                Sync skills from node_modules into agent directories (alias: sync).
+  experimental_install             Restore all skills from skills-lock.json.
+  version                          Print CLI tool version (alias: -v, --version).
 
 Flags:
-  -g, --global       Apply action to global scope (home directory).
-  -y, --yes          Skip confirmation prompts (automatic non-interactive).
-  --copy             Force copy instead of symlink.
-  -a, --agent <name> Filter action by agent type.
-  -v, --verbose      Log all persistent file system changes.
+  -g, --global                     Apply action to global scope (home directory).
+  -p, --project                    Apply action to project scope.
+  -y, --yes                        Skip confirmation prompts (automatic non-interactive).
+  --copy                           Force copy instead of symlink.
+  -a, --agent <name>               Filter action by agent type.
+  -v, --verbose                    Log all persistent file system changes.
 `
+
+func isInteractive() bool {
+	fileInfo, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fileInfo.Mode() & os.ModeCharDevice) != 0
+}
+
+func projectSkillsExist() bool {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(cwd, "skills-lock.json")); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(cwd, ".agents", "skills")); err == nil {
+		return true
+	}
+	return false
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -96,7 +124,7 @@ func main() {
 		fmt.Println("             To install remote skills, run:")
 		fmt.Printf("             \x1b[33m$ skl add <github-username>/<repo-name>\x1b[0m\n\n")
 
-	case "add":
+	case "add", "i", "install", "a":
 		source, opts := skills.ParseAddOptions(args)
 		if source == "" {
 			fmt.Println("Error: source skill path is required")
@@ -109,7 +137,7 @@ func main() {
 		}
 		fmt.Println("Successfully installed skill.")
 
-	case "list":
+	case "list", "ls":
 		var opts skills.ListOptions
 		for i := 0; i < len(args); i++ {
 			arg := args[i]
@@ -160,9 +188,64 @@ func main() {
 	case "remove", "rm", "r":
 		names, opts := skills.ParseRemoveOptions(args)
 		if len(names) == 0 && !opts.All {
-			fmt.Println("Error: at least one skill name or --all flag is required")
-			os.Exit(1)
+			if !opts.Yes && isInteractive() {
+				// Interactive removal selection
+				canonicalBase := skills.GetCanonicalSkillsDir(opts.Global, "")
+				var installedSkills []string
+				if _, err := os.Stat(canonicalBase); err == nil {
+					entries, err := os.ReadDir(canonicalBase)
+					if err == nil {
+						for _, entry := range entries {
+							if entry.IsDir() {
+								installedSkills = append(installedSkills, entry.Name())
+							}
+						}
+					}
+				}
+
+				if len(installedSkills) == 0 {
+					fmt.Println("No skills found to remove.")
+					os.Exit(0)
+				}
+
+				fmt.Println("Installed skills:")
+				for i, name := range installedSkills {
+					fmt.Printf("  %d) %s\n", i+1, name)
+				}
+
+				reader := bufio.NewReader(os.Stdin)
+				fmt.Print("Select skills to remove (comma-separated numbers, e.g. 1, 3): ")
+				input, err := reader.ReadString('\n')
+				if err != nil {
+					fmt.Printf("Error reading input: %v\n", err)
+					os.Exit(1)
+				}
+
+				input = strings.TrimSpace(input)
+				parts := strings.Split(input, ",")
+				for _, part := range parts {
+					part = strings.TrimSpace(part)
+					if part == "" {
+						continue
+					}
+					idx, err := strconv.Atoi(part)
+					if err != nil || idx < 1 || idx > len(installedSkills) {
+						fmt.Printf("Invalid selection: %q\n", part)
+						os.Exit(1)
+					}
+					names = append(names, installedSkills[idx-1])
+				}
+
+				if len(names) == 0 {
+					fmt.Println("No skills selected. Cancelled.")
+					os.Exit(0)
+				}
+			} else {
+				fmt.Println("Error: at least one skill name or --all flag is required")
+				os.Exit(1)
+			}
 		}
+
 		err := skills.RemoveSkills(names, opts, "")
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
@@ -170,7 +253,7 @@ func main() {
 		}
 		fmt.Println("Successfully removed skill(s).")
 
-	case "find":
+	case "find", "search", "f", "s":
 		if len(args) < 1 {
 			fmt.Println("Error: search query is required")
 			os.Exit(1)
@@ -227,34 +310,209 @@ func main() {
 			}
 		}
 
-	case "update":
-		if len(args) < 1 {
-			fmt.Println("Error: usage: skl update <name> [src_path]")
-			os.Exit(1)
-		}
-		name := args[0]
+	case "update", "check", "upgrade":
+		var name string
 		var src string
-		if len(args) > 1 && !strings.HasPrefix(args[1], "-") {
-			src = args[1]
-		}
+		var globalFlag bool
+		var projectFlag bool
+		var yesFlag bool
+		var verboseFlag bool
 
-		var opts skills.UpdateOptions
-		for _, arg := range args {
+		for i := 0; i < len(args); i++ {
+			arg := args[i]
 			if arg == "-g" || arg == "--global" {
-				opts.Global = true
-				break
+				globalFlag = true
+			} else if arg == "-p" || arg == "--project" {
+				projectFlag = true
+			} else if arg == "-y" || arg == "--yes" {
+				yesFlag = true
+			} else if arg == "-v" || arg == "--verbose" {
+				verboseFlag = true
+			} else if !strings.HasPrefix(arg, "-") {
+				if name == "" {
+					name = arg
+				} else if src == "" {
+					src = arg
+				}
 			}
 		}
 
-		err := skills.UpdateSkill(name, src, opts)
+		if name != "" {
+			// Single skill update
+			opts := skills.UpdateOptions{
+				Global:  globalFlag,
+				Verbose: verboseFlag,
+			}
+			err := skills.UpdateSkill(name, src, opts)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			if src != "" {
+				fmt.Printf("Successfully updated skill %q from source %q.\n", name, src)
+			} else {
+				fmt.Printf("Successfully refreshed skill %q.\n", name)
+			}
+		} else {
+			// Bulk update
+			var scope string
+			if globalFlag && projectFlag {
+				scope = "both"
+			} else if globalFlag {
+				scope = "global"
+			} else if projectFlag {
+				scope = "project"
+			} else {
+				if yesFlag || !isInteractive() {
+					if projectSkillsExist() {
+						scope = "project"
+					} else {
+						scope = "global"
+					}
+				} else {
+					fmt.Println("Select update scope:")
+					fmt.Println("  1) Project (Update skills in current directory)")
+					fmt.Println("  2) Global (Update skills in home directory)")
+					fmt.Println("  3) Both (Update all skills)")
+					reader := bufio.NewReader(os.Stdin)
+					fmt.Print("Selection (1-3): ")
+					input, err := reader.ReadString('\n')
+					if err != nil {
+						fmt.Printf("Error reading input: %v\n", err)
+						os.Exit(1)
+					}
+					input = strings.TrimSpace(input)
+					switch input {
+					case "1":
+						scope = "project"
+					case "2":
+						scope = "global"
+					case "3":
+						scope = "both"
+					default:
+						fmt.Println("Invalid selection. Cancelled.")
+						os.Exit(0)
+					}
+				}
+			}
+
+			var updateSkillsInScope = func(global bool) {
+				canonicalBase := skills.GetCanonicalSkillsDir(global, "")
+				var installedSkills []string
+				if _, err := os.Stat(canonicalBase); err == nil {
+					entries, err := os.ReadDir(canonicalBase)
+					if err == nil {
+						for _, entry := range entries {
+							if entry.IsDir() {
+								installedSkills = append(installedSkills, entry.Name())
+							}
+						}
+					}
+				}
+
+				if len(installedSkills) == 0 {
+					scopeName := "project"
+					if global {
+						scopeName = "global"
+					}
+					fmt.Printf("No installed skills found in %s scope.\n", scopeName)
+					return
+				}
+
+				scopeName := "Project"
+				if global {
+					scopeName = "Global"
+				}
+				fmt.Printf("Updating %s Skills:\n", scopeName)
+				opts := skills.UpdateOptions{
+					Global:  global,
+					Verbose: verboseFlag,
+				}
+				for _, sName := range installedSkills {
+					fmt.Printf("  • Updating skill %q...\n", sName)
+					err := skills.UpdateSkill(sName, "", opts)
+					if err != nil {
+						fmt.Printf("    ⚠️ Failed: %v\n", err)
+					} else {
+						fmt.Printf("    ✓ Successfully updated %q\n", sName)
+					}
+				}
+			}
+
+			if scope == "project" || scope == "both" {
+				updateSkillsInScope(false)
+			}
+			if scope == "global" || scope == "both" {
+				updateSkillsInScope(true)
+			}
+		}
+
+	case "config":
+		if len(args) < 2 {
+			fmt.Println("Error: usage:\n  skl config set <key> <value>\n  skl config get <key>")
+			os.Exit(1)
+		}
+		subCmd := strings.ToLower(args[0])
+		if subCmd == "set" {
+			if len(args) < 3 {
+				fmt.Println("Error: value is required for set")
+				os.Exit(1)
+			}
+			key := args[1]
+			val := args[2]
+			err := skills.SetConfigKey(key, val)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Successfully set %s = %s\n", key, val)
+		} else if subCmd == "get" {
+			key := args[1]
+			val, err := skills.GetConfigKey(key)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(val)
+		} else {
+			fmt.Printf("Unknown config subcommand %q\n", subCmd)
+			os.Exit(1)
+		}
+
+	case "experimental_sync", "sync":
+		var opts skills.SyncOptions
+		for i := 0; i < len(args); i++ {
+			arg := args[i]
+			if arg == "-y" || arg == "--yes" {
+				opts.Yes = true
+			} else if arg == "-f" || arg == "--force" {
+				opts.Force = true
+			} else if arg == "-v" || arg == "--verbose" {
+				opts.Verbose = true
+			} else if arg == "-a" || arg == "--agent" {
+				if i+1 < len(args) {
+					i++
+					parts := strings.Split(args[i], ",")
+					for _, part := range parts {
+						trimmed := strings.TrimSpace(part)
+						if trimmed != "" {
+							opts.Agent = append(opts.Agent, skills.AgentType(trimmed))
+						}
+					}
+				}
+			}
+		}
+		err := skills.SyncSkills(args, opts, "")
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
 		}
-		if src != "" {
-			fmt.Printf("Successfully updated skill %q from source %q.\n", name, src)
-		} else {
-			fmt.Printf("Successfully refreshed skill %q.\n", name)
+
+	case "experimental_install":
+		err := skills.RestoreFromLock(args, "")
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
 		}
 
 	default:
@@ -262,3 +520,4 @@ func main() {
 		os.Exit(1)
 	}
 }
+

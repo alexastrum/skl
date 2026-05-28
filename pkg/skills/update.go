@@ -20,26 +20,11 @@ func UpdateSkill(name string, srcDir string, opts UpdateOptions) error {
 	}
 
 	// 1. Resolve target installed directory
-	var baseDir string
-	if opts.Global {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("failed to resolve user home directory: %w", err)
-		}
-		// Antigravity global skills dir: ~/.gemini/antigravity/skills
-		baseDir = filepath.Join(homeDir, ".gemini", "antigravity", "skills")
-	} else {
-		cwd := opts.Cwd
-		if cwd == "" {
-			var err error
-			cwd, err = os.Getwd()
-			if err != nil {
-				return fmt.Errorf("failed to get current working directory: %w", err)
-			}
-		}
-		// Project skills canonical dir: .agents/skills
-		baseDir = filepath.Join(cwd, ".agents", "skills")
+	cwd := opts.Cwd
+	if cwd == "" {
+		cwd, _ = os.Getwd()
 	}
+	baseDir := GetCanonicalSkillsDir(opts.Global, cwd)
 
 	skillDir := filepath.Join(baseDir, name)
 

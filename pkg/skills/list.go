@@ -12,26 +12,14 @@ func ListInstalledSkills(opts ListOptions) ([]InstalledSkill, error) {
 	var targetDir string
 	scope := "project"
 
+	cwd := opts.Cwd
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
 	if opts.Global {
 		scope = "global"
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, err
-		}
-		// Based on agents mapping, Antigravity's global skills dir is ~/.gemini/antigravity/skills
-		targetDir = filepath.Join(homeDir, ".gemini", "antigravity", "skills")
-	} else {
-		cwd := opts.Cwd
-		if cwd == "" {
-			var err error
-			cwd, err = os.Getwd()
-			if err != nil {
-				return nil, err
-			}
-		}
-		// Canonical project skills directory is .agents/skills
-		targetDir = filepath.Join(cwd, ".agents", "skills")
 	}
+	targetDir = GetCanonicalSkillsDir(opts.Global, cwd)
 
 	// Check if directory exists
 	if _, err := os.Stat(targetDir); os.IsNotExist(err) {

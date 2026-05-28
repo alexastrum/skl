@@ -30,6 +30,17 @@ func ParseRemoveOptions(args []string) ([]string, RemoveOptions) {
 			options.Yes = true
 		} else if arg == "--all" {
 			options.All = true
+		} else if arg == "-s" || arg == "--skill" {
+			if i+1 < len(args) {
+				i++
+				parts := strings.Split(args[i], ",")
+				for _, part := range parts {
+					trimmed := strings.TrimSpace(part)
+					if trimmed != "" {
+						skills = append(skills, trimmed)
+					}
+				}
+			}
 		} else if arg == "-a" || arg == "--agent" {
 			for i+1 < len(args) {
 				nextArg := args[i+1]
@@ -88,7 +99,6 @@ func RemoveSkills(skillNames []string, opts RemoveOptions, cwd string) error {
 		}
 	}
 
-	var canonicalBase string
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("failed to resolve user home: %w", err)
@@ -99,11 +109,7 @@ func RemoveSkills(skillNames []string, opts RemoveOptions, cwd string) error {
 		configHome = filepath.Join(home, ".config")
 	}
 
-	if opts.Global {
-		canonicalBase = filepath.Join(home, ".gemini", "antigravity", "skills")
-	} else {
-		canonicalBase = filepath.Join(cwd, ".agents", "skills")
-	}
+	canonicalBase := GetCanonicalSkillsDir(opts.Global, cwd)
 
 	// Scan the installed skills in the canonical directory first
 	var installedSkills []string

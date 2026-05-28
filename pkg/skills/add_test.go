@@ -233,7 +233,7 @@ func TestAddSkill_DepthAndExclusion(t *testing.T) {
 	_ = os.MkdirAll(dotGit, 0755)
 	_ = os.WriteFile(filepath.Join(dotGit, "SKILL.md"), []byte("---\nname: ignored-git\n---\n"), 0644)
 
-	dirs := findSkillDirectories(srcDir)
+	dirs := findSkillDirectories(srcDir, false)
 
 	// Verify depth-zero, depth-one, and depth-two are found, but others are excluded
 	hasZero := false
@@ -451,14 +451,19 @@ func TestGitRepoHelpers(t *testing.T) {
 	}
 
 	// Test parseRemoteSource
-	url1, name1 := parseRemoteSource("foo/bar@v2")
-	if url1 != "https://github.com/foo/bar.git" || name1 != "v2" {
-		t.Errorf("parseRemoteSource(foo/bar@v2) = (%q, %q)", url1, name1)
+	url1, ref1, name1 := parseRemoteSource("foo/bar@v2")
+	if url1 != "https://github.com/foo/bar.git" || ref1 != "" || name1 != "v2" {
+		t.Errorf("parseRemoteSource(foo/bar@v2) = (%q, %q, %q)", url1, ref1, name1)
 	}
 
-	url2, name2 := parseRemoteSource("https://github.com/foo/bar@custom-ref")
-	if url2 != "https://github.com/foo/bar" || name2 != "custom-ref" {
-		t.Errorf("parseRemoteSource(https://github.com/foo/bar@custom-ref) = (%q, %q)", url2, name2)
+	url2, ref2, name2 := parseRemoteSource("https://github.com/foo/bar@custom-ref")
+	if url2 != "https://github.com/foo/bar" || ref2 != "" || name2 != "custom-ref" {
+		t.Errorf("parseRemoteSource(https://github.com/foo/bar@custom-ref) = (%q, %q, %q)", url2, ref2, name2)
+	}
+
+	url3, ref3, name3 := parseRemoteSource("foo/bar#v1.0.0@v2")
+	if url3 != "https://github.com/foo/bar.git" || ref3 != "v1.0.0" || name3 != "v2" {
+		t.Errorf("parseRemoteSource(foo/bar#v1.0.0@v2) = (%q, %q, %q)", url3, ref3, name3)
 	}
 }
 
