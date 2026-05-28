@@ -67,14 +67,63 @@ func ListInstalledSkills(opts ListOptions) ([]InstalledSkill, error) {
 			description = d
 		}
 
-		// Determine associated agents
+		// Determine associated agents dynamically
 		var agentsList []AgentType
-		if scope == "global" {
-			agentsList = []AgentType{AgentAntigravity}
-		} else {
-			// Universal and Antigravity both use `.agents/skills` at the project scope
-			agentsList = []AgentType{AgentAntigravity, AgentUniversal}
+		detectedAgents := DetectInstalledAgents(cwd)
+		if !opts.Global {
+			detectedAgents = append(detectedAgents, AgentUniversal)
 		}
+
+		var agentsToCheck []AgentType
+		if len(opts.AgentFilter) > 0 {
+			agentsToCheck = opts.AgentFilter
+		} else {
+			agentsToCheck = detectedAgents
+		}
+
+		for _, agentType := range agentsToCheck {
+			cfg, ok := Agents[agentType]
+			if !ok {
+				continue
+			}
+
+			var agentBase string
+			if scope == "global" {
+				if cfg.GlobalSkillsDir == "" {
+					continue
+				}
+				agentBase = ResolvePath(cfg.GlobalSkillsDir, cwd)
+			} else {
+				if cfg.SkillsDir == "" {
+					continue
+				}
+				agentBase = filepath.Join(cwd, cfg.SkillsDir)
+			}
+
+			found := false
+			possibleNames := []string{entry.Name(), SanitizeName(name), name}
+			nameMap := make(map[string]bool)
+			var uniqueNames []string
+			for _, n := range possibleNames {
+				if n != "" && !nameMap[n] {
+					nameMap[n] = true
+					uniqueNames = append(uniqueNames, n)
+				}
+			}
+
+			for _, possibleName := range uniqueNames {
+				agentSkillDir := filepath.Join(agentBase, possibleName)
+				if _, err := os.Stat(agentSkillDir); err == nil {
+					found = true
+					break
+				}
+			}
+
+			if found {
+				agentsList = append(agentsList, agentType)
+			}
+		}
+
 
 		// Apply AgentFilter if provided
 		if len(opts.AgentFilter) > 0 {

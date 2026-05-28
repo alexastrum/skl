@@ -41,6 +41,133 @@ Flags:
   -v, --verbose                    Log all persistent file system changes.
 `
 
+const initHelp = `skl init - Initialize a new agent skill template
+
+Usage:
+  skl init [name]
+
+Arguments:
+  [name]               Optional name of the subdirectory to initialize the skill in.
+                       If not provided, initializes in the current directory.
+
+Description:
+  Creates a basic SKILL.md template with default YAML frontmatter headers.
+`
+
+const addHelp = `skl add - Install an agent skill
+
+Usage:
+  skl add <source> [flags]
+
+Arguments:
+  <source>             Local folder path, Git repository URL, or GitHub owner/repo shorthand.
+
+Flags:
+  -g, --global         Install globally (in home directory).
+  -p, --project        Install locally in the current directory (default).
+  -y, --yes            Skip interactive prompts and accept defaults automatically.
+  --copy               Force copying of skill files instead of creating symbolic links.
+  -a, --agent <name>   Target a specific agent (default: auto-detects installed agents).
+  -v, --verbose        Log all file copy and symlink changes.
+`
+
+const listHelp = `skl list - List installed agent skills
+
+Usage:
+  skl list [flags]
+
+Flags:
+  -g, --global         List global skills.
+  -p, --project        List project skills (default).
+  -a, --agent <name>   Filter results by agent type.
+  --json               Output as structured JSON.
+`
+
+const removeHelp = `skl remove - Uninstall agent skills
+
+Usage:
+  skl remove [names...] [flags]
+
+Arguments:
+  [names...]           One or more names of the skills to remove.
+                       If not provided, starts interactive selection.
+
+Flags:
+  -g, --global         Remove from global scope.
+  -p, --project        Remove from project scope (default).
+  -y, --yes            Skip confirmation prompt.
+  --all                Uninstall all skills in the selected scope.
+  -a, --agent <name>   Target a specific agent for removal.
+`
+
+const findHelp = `skl find - Search or retrieve installed skills
+
+Usage:
+  skl find <query> [flags]
+
+Arguments:
+  <query>              Name, slug, or keyword to search for.
+
+Flags:
+  -l, --local          Search only locally installed skills.
+  -j, --json           Output search results in JSON format.
+`
+
+const updateHelp = `skl update - Update or refresh installed skills
+
+Usage:
+  skl update [name] [src] [flags]
+
+Arguments:
+  [name]               Name of the skill to update. If omitted, updates all skills.
+  [src]                Optional new source path or URL.
+
+Flags:
+  -g, --global         Update in global scope.
+  -p, --project        Update in project scope (default).
+  -y, --yes            Skip confirmation prompt.
+  -v, --verbose        Enable verbose output.
+`
+
+const configHelp = `skl config - Manage configuration overrides
+
+Usage:
+  skl config set <key> <value>
+  skl config get <key>
+
+Keys:
+  canonicalDir.global   Override the global base directory.
+  canonicalDir.project  Override the project base directory.
+`
+
+const syncHelp = `skl sync - Sync skills from node_modules
+
+Usage:
+  skl experimental_sync [flags]
+
+Flags:
+  -y, --yes            Skip confirmation prompt.
+  -f, --force          Force overwrite existing skills.
+  -v, --verbose        Enable verbose output.
+  -a, --agent <name>   Filter target agents (comma-separated).
+`
+
+const installHelp = `skl experimental_install - Restore skills from lockfile
+
+Usage:
+  skl experimental_install
+`
+
+func hasHelp(args []string) bool {
+	for _, arg := range args {
+		if arg == "help" || arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
+
 func isInteractive() bool {
 	fileInfo, err := os.Stdin.Stat()
 	if err != nil {
@@ -80,6 +207,10 @@ func main() {
 		fmt.Printf("skl version %s\n", version)
 
 	case "init":
+		if hasHelp(args) {
+			fmt.Print(initHelp)
+			os.Exit(0)
+		}
 		var name string
 		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 			name = args[0]
@@ -125,6 +256,10 @@ func main() {
 		fmt.Printf("             \x1b[33m$ skl add <github-username>/<repo-name>\x1b[0m\n\n")
 
 	case "add", "i", "install", "a":
+		if hasHelp(args) {
+			fmt.Print(addHelp)
+			os.Exit(0)
+		}
 		source, opts := skills.ParseAddOptions(args)
 		if source == "" {
 			fmt.Println("Error: source skill path is required")
@@ -138,6 +273,10 @@ func main() {
 		fmt.Println("Successfully installed skill.")
 
 	case "list", "ls":
+		if hasHelp(args) {
+			fmt.Print(listHelp)
+			os.Exit(0)
+		}
 		var opts skills.ListOptions
 		for i := 0; i < len(args); i++ {
 			arg := args[i]
@@ -186,6 +325,10 @@ func main() {
 		}
 
 	case "remove", "rm", "r":
+		if hasHelp(args) {
+			fmt.Print(removeHelp)
+			os.Exit(0)
+		}
 		names, opts := skills.ParseRemoveOptions(args)
 		if len(names) == 0 && !opts.All {
 			if !opts.Yes && isInteractive() {
@@ -254,6 +397,10 @@ func main() {
 		fmt.Println("Successfully removed skill(s).")
 
 	case "find", "search", "f", "s":
+		if hasHelp(args) {
+			fmt.Print(findHelp)
+			os.Exit(0)
+		}
 		if len(args) < 1 {
 			fmt.Println("Error: search query is required")
 			os.Exit(1)
@@ -311,6 +458,10 @@ func main() {
 		}
 
 	case "update", "check", "upgrade":
+		if hasHelp(args) {
+			fmt.Print(updateHelp)
+			os.Exit(0)
+		}
 		var name string
 		var src string
 		var globalFlag bool
@@ -448,6 +599,10 @@ func main() {
 		}
 
 	case "config":
+		if hasHelp(args) {
+			fmt.Print(configHelp)
+			os.Exit(0)
+		}
 		if len(args) < 2 {
 			fmt.Println("Error: usage:\n  skl config set <key> <value>\n  skl config get <key>")
 			os.Exit(1)
@@ -480,6 +635,10 @@ func main() {
 		}
 
 	case "experimental_sync", "sync":
+		if hasHelp(args) {
+			fmt.Print(syncHelp)
+			os.Exit(0)
+		}
 		var opts skills.SyncOptions
 		for i := 0; i < len(args); i++ {
 			arg := args[i]
@@ -509,6 +668,10 @@ func main() {
 		}
 
 	case "experimental_install":
+		if hasHelp(args) {
+			fmt.Print(installHelp)
+			os.Exit(0)
+		}
 		err := skills.RestoreFromLock(args, "")
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
