@@ -116,5 +116,5 @@ skl find golang-testing
 ### Path sanitization
 Every input skill name is sanitized using `SanitizeName()`. This replaces special characters with hyphens, lowercases the string, and truncates to 255 characters to prevent directory traversal attempts (CWE-22).
 
-### Canonical protection
-When a skill is installed, the canonical files are stored in `.agents/skills/<skill-name>`. If you remove a skill from a specific agent's scope, the CLI checks if other agents still reference it. If another active agent is using the skill, the CLI leaves the canonical files in place.
+### Shared skill deduplication
+To save disk space and avoid cloning identical git repositories multiple times, skills are downloaded once to a shared directory (`.agents/skills/<skill-name>`) and then symlinked into each agent's active scope. When you remove a skill from a specific agent, the CLI doesn't blindly delete the shared source files. Instead, it checks active references across all configured agents in the workspace, only deleting the physical repository files when the last agent stops using it. This prevents breaking other active agents that still depend on those symlinks.
