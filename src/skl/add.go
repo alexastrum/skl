@@ -1,4 +1,4 @@
-package skills
+package skl
 
 import (
 	"archive/zip"

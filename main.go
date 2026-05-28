@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/alexastrum/skl/pkg/skills"
+	"github.com/alexastrum/skl/src/skl"
 )
 
 const version = "1.0.0"
@@ -77,7 +77,7 @@ Usage:
   skl list [flags]
 
 Flags:
-  -g, --global         List global skills.
+  -g, --global         List global skl.
   -p, --project        List project skills (default).
   -a, --agent <name>   Filter results by agent type.
   --json               Output as structured JSON.
@@ -109,7 +109,7 @@ Arguments:
   <query>              Name, slug, or keyword to search for.
 
 Flags:
-  -l, --local          Search only locally installed skills.
+  -l, --local          Search only locally installed skl.
   -j, --json           Output search results in JSON format.
 `
 
@@ -119,7 +119,7 @@ Usage:
   skl update [name] [src] [flags]
 
 Arguments:
-  [name]               Name of the skill to update. If omitted, updates all skills.
+  [name]               Name of the skill to update. If omitted, updates all skl.
   [src]                Optional new source path or URL.
 
 Flags:
@@ -147,7 +147,7 @@ Usage:
 
 Flags:
   -y, --yes            Skip confirmation prompt.
-  -f, --force          Force overwrite existing skills.
+  -f, --force          Force overwrite existing skl.
   -v, --verbose        Enable verbose output.
   -a, --agent <name>   Filter target agents (comma-separated).
 `
@@ -215,11 +215,11 @@ func main() {
 		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 			name = args[0]
 		}
-		path, err := skills.InitSkill(skills.InitOptions{
+		path, err := skl.InitSkill(skl.InitOptions{
 			Name: name,
 		})
 		if err != nil {
-			if errors.Is(err, skills.ErrSkillAlreadyExists) {
+			if errors.Is(err, skl.ErrSkillAlreadyExists) {
 				fmt.Printf("⚠️  Warning: %v\n", err)
 				os.Exit(0)
 			}
@@ -260,12 +260,12 @@ func main() {
 			fmt.Print(addHelp)
 			os.Exit(0)
 		}
-		source, opts := skills.ParseAddOptions(args)
+		source, opts := skl.ParseAddOptions(args)
 		if source == "" {
 			fmt.Println("Error: source skill path is required")
 			os.Exit(1)
 		}
-		err := skills.AddSkill(source, opts, "")
+		err := skl.AddSkill(source, opts, "")
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -277,7 +277,7 @@ func main() {
 			fmt.Print(listHelp)
 			os.Exit(0)
 		}
-		var opts skills.ListOptions
+		var opts skl.ListOptions
 		for i := 0; i < len(args); i++ {
 			arg := args[i]
 			if arg == "-g" || arg == "--global" {
@@ -285,12 +285,12 @@ func main() {
 			} else if arg == "-a" || arg == "--agent" {
 				if i+1 < len(args) {
 					i++
-					opts.AgentFilter = append(opts.AgentFilter, skills.AgentType(args[i]))
+					opts.AgentFilter = append(opts.AgentFilter, skl.AgentType(args[i]))
 				}
 			}
 		}
 
-		installed, err := skills.ListInstalledSkills(opts)
+		installed, err := skl.ListInstalledSkills(opts)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -329,11 +329,11 @@ func main() {
 			fmt.Print(removeHelp)
 			os.Exit(0)
 		}
-		names, opts := skills.ParseRemoveOptions(args)
+		names, opts := skl.ParseRemoveOptions(args)
 		if len(names) == 0 && !opts.All {
 			if !opts.Yes && isInteractive() {
 				// Interactive removal selection
-				canonicalBase := skills.GetCanonicalSkillsDir(opts.Global, "")
+				canonicalBase := skl.GetCanonicalSkillsDir(opts.Global, "")
 				var installedSkills []string
 				if _, err := os.Stat(canonicalBase); err == nil {
 					entries, err := os.ReadDir(canonicalBase)
@@ -389,7 +389,7 @@ func main() {
 			}
 		}
 
-		err := skills.RemoveSkills(names, opts, "")
+		err := skl.RemoveSkills(names, opts, "")
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -418,7 +418,7 @@ func main() {
 			}
 		}
 
-		res, err := skills.FindSkills(skills.FindOptions{
+		res, err := skl.FindSkills(skl.FindOptions{
 			Query: query,
 			Local: local,
 		})
@@ -490,11 +490,11 @@ func main() {
 
 		if name != "" {
 			// Single skill update
-			opts := skills.UpdateOptions{
+			opts := skl.UpdateOptions{
 				Global:  globalFlag,
 				Verbose: verboseFlag,
 			}
-			err := skills.UpdateSkill(name, src, opts)
+			err := skl.UpdateSkill(name, src, opts)
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
@@ -548,7 +548,7 @@ func main() {
 			}
 
 			var updateSkillsInScope = func(global bool) {
-				canonicalBase := skills.GetCanonicalSkillsDir(global, "")
+				canonicalBase := skl.GetCanonicalSkillsDir(global, "")
 				var installedSkills []string
 				if _, err := os.Stat(canonicalBase); err == nil {
 					entries, err := os.ReadDir(canonicalBase)
@@ -575,13 +575,13 @@ func main() {
 					scopeName = "Global"
 				}
 				fmt.Printf("Updating %s Skills:\n", scopeName)
-				opts := skills.UpdateOptions{
+				opts := skl.UpdateOptions{
 					Global:  global,
 					Verbose: verboseFlag,
 				}
 				for _, sName := range installedSkills {
 					fmt.Printf("  • Updating skill %q...\n", sName)
-					err := skills.UpdateSkill(sName, "", opts)
+					err := skl.UpdateSkill(sName, "", opts)
 					if err != nil {
 						fmt.Printf("    ⚠️ Failed: %v\n", err)
 					} else {
@@ -615,7 +615,7 @@ func main() {
 			}
 			key := args[1]
 			val := args[2]
-			err := skills.SetConfigKey(key, val)
+			err := skl.SetConfigKey(key, val)
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
@@ -623,7 +623,7 @@ func main() {
 			fmt.Printf("Successfully set %s = %s\n", key, val)
 		} else if subCmd == "get" {
 			key := args[1]
-			val, err := skills.GetConfigKey(key)
+			val, err := skl.GetConfigKey(key)
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
@@ -639,7 +639,7 @@ func main() {
 			fmt.Print(syncHelp)
 			os.Exit(0)
 		}
-		var opts skills.SyncOptions
+		var opts skl.SyncOptions
 		for i := 0; i < len(args); i++ {
 			arg := args[i]
 			if arg == "-y" || arg == "--yes" {
@@ -655,13 +655,13 @@ func main() {
 					for _, part := range parts {
 						trimmed := strings.TrimSpace(part)
 						if trimmed != "" {
-							opts.Agent = append(opts.Agent, skills.AgentType(trimmed))
+							opts.Agent = append(opts.Agent, skl.AgentType(trimmed))
 						}
 					}
 				}
 			}
 		}
-		err := skills.SyncSkills(args, opts, "")
+		err := skl.SyncSkills(args, opts, "")
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -672,7 +672,7 @@ func main() {
 			fmt.Print(installHelp)
 			os.Exit(0)
 		}
-		err := skills.RestoreFromLock(args, "")
+		err := skl.RestoreFromLock(args, "")
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
