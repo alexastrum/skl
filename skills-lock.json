@@ -217,7 +217,7 @@
       "computedHash": "f32c3e6e950b39bb99577bd8bf89ebeb869d9e875b8f7411c20e5753e4e05cae"
     },
     "humanizer": {
-      "source": "blader/humanizer",
+      "source": "alexastrum/humanizer",
       "sourceType": "git",
       "computedHash": "d69e838c069f0017aec1bc6b4a9eda7ad4b23a3fa4ec196f4e2342803aa22915"
     }
