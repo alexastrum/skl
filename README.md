@@ -1,8 +1,8 @@
 # skl: Agent Skills CLI Manager
 
-`skl` is a fast CLI tool for managing Agent Skills, written in Go.
+`skl` is a fast, dependency-free CLI tool for managing Agent Skills, written in Go.
 
-I ported a TypeScript CLI to Go to learn the language. This repository contains the results of that experiment: a side-by-side comparison of runtime speed, binary size, dependencies, and code structure.
+This project is a Go port and direct rewrite of the original [`skills`](https://www.npmjs.com/package/skills) (commonly run via `npx skills`) TypeScript package. It replicates its full command set and logic, serving as a high-performance, secure replacement that is immune to NPM supply chain attacks.
 
 ## Why Go?
 
