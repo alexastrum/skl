@@ -1,0 +1,23 @@
+# Go binaries and archives
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+skills-go
+skl
+
+# Local log files and coverage
+*.log
+coverage.out
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
