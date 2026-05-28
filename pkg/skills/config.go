@@ -93,9 +93,9 @@ func GetCanonicalSkillsDir(global bool, cwd string) string {
 	if global {
 		home, err := os.UserHomeDir()
 		if err == nil {
-			return filepath.Join(home, ".gemini", "antigravity", "skills")
+			return filepath.Join(home, ".agents", "skills")
 		}
-		return filepath.Join(cwd, ".gemini", "antigravity", "skills")
+		return filepath.Join(cwd, ".agents", "skills")
 	}
 	return filepath.Join(cwd, ".agents", "skills")
 }

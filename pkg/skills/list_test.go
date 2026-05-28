@@ -78,9 +78,9 @@ func TestListInstalledSkills_Global(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("USERPROFILE", tmpDir)
 
-	// Create a mock global skill under `~/.gemini/antigravity/skills/global-skill`
-	// Since HOME=tmpDir, that resolves to `<tmpDir>/.gemini/antigravity/skills/global-skill`
-	skillDir := filepath.Join(tmpDir, ".gemini", "antigravity", "skills", "global-skill")
+	// Create a mock global skill under `~/.agents/skills/global-skill`
+	// Since HOME=tmpDir, that resolves to `<tmpDir>/.agents/skills/global-skill`
+	skillDir := filepath.Join(tmpDir, ".agents", "skills", "global-skill")
 	if err := os.MkdirAll(skillDir, 0755); err != nil {
 		t.Fatalf("failed to create global skill dir: %v", err)
 	}

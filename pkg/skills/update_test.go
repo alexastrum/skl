@@ -116,8 +116,8 @@ func TestUpdateSkill_Global(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("USERPROFILE", tmpDir)
 
-	// Create a global mock skill in ~/.gemini/antigravity/skills/global-skill
-	skillDir := filepath.Join(tmpDir, ".gemini", "antigravity", "skills", "global-skill")
+	// Create a global mock skill in ~/.agents/skills/global-skill
+	skillDir := filepath.Join(tmpDir, ".agents", "skills", "global-skill")
 	if err := os.MkdirAll(skillDir, 0755); err != nil {
 		t.Fatalf("failed to create global skill dir: %v", err)
 	}
