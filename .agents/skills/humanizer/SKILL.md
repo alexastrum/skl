@@ -1,6 +1,6 @@
 ---
 name: humanizer
-version: 2.7.0
+version: 2.8.0
 description: |
   Remove signs of AI-generated writing from text. Use when editing or reviewing
   text to make it sound more natural and human-written. Based on Wikipedia's
@@ -288,15 +288,20 @@ Before returning the final rewrite, scan it for `—` and `–`. Any hit means t
 
 ### 16. Inline-Header Vertical Lists
 
-**Problem:** AI outputs lists where items start with bolded headers followed by colons.
+**Problem:** AI outputs lists where items start with bolded headers or italicized conceptual descriptors followed by colons (e.g., `- **Performance**: ...` or `- *Cognitive Noise*: ...`). Humans write paragraphs or simple, plain bullet points, using conceptual headings in lists far less frequently (about 1/5th as often as AI).
 
 **Before:**
 > - **User Experience:** The user experience has been significantly improved with a new interface.
 > - **Performance:** Performance has been enhanced through optimized algorithms.
 > - **Security:** Security has been strengthened with end-to-end encryption.
+> 
+> * *Cognitive Noise*: Lifetimes (`'a`) are everywhere.
+> * *Type Complexity*: TypeScript trends toward type gymnastics.
 
 **After:**
 > The update improves the interface, speeds up load times through optimized algorithms, and adds end-to-end encryption.
+> 
+> In Rust, explicit lifetimes (`'a`) are required everywhere, increasing cognitive noise. In TypeScript, the type system often trends toward complex type gymnastics.
 
 
 ### 17. Title Case in Headings
@@ -481,6 +486,19 @@ Before returning the final rewrite, scan it for `—` and `–`. Any hit means t
 
 **After:**
 > This function uses a hash map for O(1) lookups, avoiding the O(n²) cost of naive iteration.
+### 31. Two-Part, Coloned, or Parenthetical Headings
+
+**Problem:** AI loves to write two-part titles or add parenthetical descriptors to headings (e.g. `The Turning Point: The Cost of Dependencies` or `Readability and Maintainability (The "15-Minute Rule")`). Humans pick exactly one direct, clean title per section.
+
+**Before:**
+> ## The Turning Point: The Cost of Dependencies
+> ### Readability and Maintainability (The "15-Minute Rule")
+> #### Baseline Cold Start (Version Flag Check)
+
+**After:**
+> ## The Cost of Dependencies
+> ### Readability
+> #### Baseline Cold Start
 
 
 ## DETECTION GUIDANCE

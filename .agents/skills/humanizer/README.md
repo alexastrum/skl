@@ -119,7 +119,7 @@ The skill also includes a final "obviously AI generated" audit pass and a second
 |---|---------|--------|-------|
 | 14 | **Em/en dashes** | "institutions—not the people—yet this continues—" | Cut them: periods, commas, colons, or parentheses |
 | 15 | **Boldface overuse** | "**OKRs**, **KPIs**, **BMC**" | "OKRs, KPIs, BMC" |
-| 16 | **Inline-header lists** | "**Performance:** Performance improved" | Convert to prose |
+| 16 | **Inline-header lists** | "**Performance:** Performance improved", "*Cognitive Noise*: ..." | Convert to prose or plain bullets |
 | 17 | **Title Case Headings** | "Strategic Negotiations And Partnerships" | "Strategic negotiations and partnerships" |
 | 18 | **Emojis** | "🚀 Launch Phase: 💡 Key Insight:" | Remove emojis |
 | 19 | **Curly quotes** | `said “the project”` | `said “the project”` |
@@ -128,6 +128,7 @@ The skill also includes a final "obviously AI generated" audit pass and a second
 | 28 | **Signposting announcements** | "Let's dive in", "Here's what you need to know" | Start with the content |
 | 29 | **Fragmented headers** | "## Performance" + "Speed matters." | Let the heading do the work |
 | 30 | **Diff-anchored writing** | "This function was added to replace..." | Describe what it does, not what changed |
+| 31 | **Two-part/parenthetical headings** | "The Cost: Dependencies", "Readability (The Rule)" | Pick exactly one direct, clean title |
 
 ### Communication Patterns
 
@@ -180,6 +181,7 @@ The skill also includes a final "obviously AI generated" audit pass and a second
 
 ## Version History
 
+- **2.8.0** - Added pattern #31 (two-part or parenthetical headings); expanded #16 to cover italicized/bolded conceptual descriptors (e.g. `*Cognitive Noise*: ...`) and discourage excessive vertical lists with inline headers. 31 patterns total.
 - **2.7.0** - Added pattern #30 (diff-anchored writing); made em/en dashes a hard cut rather than "overuse"; expanded #21 to cover speculative gap-filling ("maintains a low profile"). 30 patterns total.
 - **2.6.0** - Cleanup pass: consolidated the duplicated workflow sections, gated the personality guidance to content where voice is wanted, removed the model-fingerprinting subsection, and condensed the worked example. No change to the 29 patterns.
 - **2.5.1** - Added a passive-voice / subjectless-fragment rule, raising the total to 29 patterns
