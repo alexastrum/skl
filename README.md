@@ -1,6 +1,6 @@
-# 🚀 skl: Agentic AI Skills CLI Manager
+# 🚀 skl: Agent Skills CLI Manager
 
-`skl` is a high-performance, robust, and feature-complete CLI manager for Agentic AI Skills, written natively in Go. It provides 100% feature parity with the reference TypeScript implementation while offering **~200x faster cold starts**, zero external runtime dependencies, and comprehensive multi-agent symlinking management.
+`skl` is a high-performance, robust, and feature-complete CLI manager for Agent Skills, written natively in Go. It provides 100% feature parity with the reference TypeScript implementation while offering **~200x faster cold starts**, zero external runtime dependencies, and comprehensive multi-agent symlinking management.
 
 Built with native Go engineering best practices, `skl` implements depth-controlled scanning, automated multi-agent discovery, secure path sanitization, and the **10 Commandments of Go Error Handling**.
 
@@ -51,7 +51,7 @@ go test -v ./...
 ## 💻 CLI Commands & Usage
 
 ```bash
-skl - Agentic AI Skills CLI Manager
+skl - Agent Skills CLI Manager
 
 Usage:
   skl <command> [arguments]

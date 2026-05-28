@@ -1,14 +1,14 @@
-# 🤖 Agent Configurations & Discovery in Go Skills
+# 🤖 Agent Configurations & Discovery in skl
 
-`go-skills` provides first-class support for **40+ Agentic AI environments**, including major IDE plugins, standalone clients, CLI agents, and development assistants. 
+`skl` provides first-class support for **40+ Agent environments**, including major IDE plugins, standalone clients, CLI agents, and development assistants. 
 
-Each agent defines its own configuration directories, skills folder mappings, and active detection algorithms. At runtime, `go-skills` dynamically evaluates your local filesystem and active environment variables to determine which agents are installed, allowing it to route, copy, and link your skills seamlessly.
+Each agent defines its own configuration directories, skills folder mappings, and active detection algorithms. At runtime, `skl` dynamically evaluates your local filesystem and active environment variables to determine which agents are installed, allowing it to route, copy, and link your skills seamlessly.
 
 ---
 
 ## 📂 Mapped Agents & Environments
 
-The following table summarizes a selection of key agents supported by `go-skills`:
+The following table summarizes a selection of key agents supported by `skl`:
 
 | Agent Type Key | Display Name | Project Skills Folder | Global Skills Folder | Detection Strategy |
 | :--- | :--- | :--- | :--- | :--- |
@@ -26,8 +26,8 @@ The following table summarizes a selection of key agents supported by `go-skills
 
 ## ⚡ Active Discovery & Detection Mechanics
 
-In `go-skills`, discovery is handled via the `DetectInstalled` callback inside `AgentConfig`. 
-At runtime, when no specific agent is targeted, `go-skills` executes the following algorithm:
+In `skl`, discovery is handled via the `DetectInstalled` callback inside `AgentConfig`. 
+At runtime, when no specific agent is targeted, `skl` executes the following algorithm:
 
 ```go
 func detectInstalledAgents(home, configHome, cwd string) []AgentType {
@@ -54,7 +54,7 @@ Leverages system environment variables to locate configuration files correctly o
 
 ## 🔗 How Symlink Mappings are Routed
 
-When you add a skill, `go-skills` automatically resolves the correct link targets:
+When you add a skill, `skl` automatically resolves the correct link targets:
 
 ```mermaid
 graph TD
