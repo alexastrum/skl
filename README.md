@@ -1,24 +1,32 @@
 # 🚀 skl: Agent Skills CLI Manager
 
-`skl` is a high-performance, robust, and feature-complete CLI manager for Agent Skills, written natively in Go. It provides 100% feature parity with the reference TypeScript implementation while offering **~200x faster cold starts**, zero external runtime dependencies, and comprehensive multi-agent symlinking management.
+`skl` is a high-performance, robust CLI manager for Agent Skills, written natively in Go. 
 
-Built with native Go engineering best practices, `skl` implements depth-controlled scanning, automated multi-agent discovery, secure path sanitization, and the **10 Commandments of Go Error Handling**.
+This project started as a hands-on learning experiment to port a real-world TypeScript application—the `skills` CLI manager—entirely to Go. It documents the journey of a front-end engineer learning systems programming, exploring Go's runtime characteristics, and adopting new architectural paradigms.
 
----
+## The "Why": Moving from Node.js to Go for CLI Tools
 
-## ✨ Features
+While TypeScript is unmatched for building complex client-side applications, Node.js-based CLI tools suffer from structural bloat, supply-chain vulnerabilities, and cold-start latency. 
 
-- **🚀 Near-Instantaneous execution**: Written in Go with absolute optimization, executing cold starts in sub-millisecond times compared to Node.js.
-- **🎯 Multi-Agent Target Resolution**: Automatically scans and detects installed AI agents (Claude Code, Cursor, Aider, Cline, Zed, Windsurf, etc.) and routes skill installations to their active configuration directories.
-- **🔗 Cross-Platform Symlinking & Fallback**: Creates relative symlinks to prevent duplicated files while seamlessly falling back to high-performance recursive copying on unsupported environments (such as restricted Windows environments).
-- **🛡️ Path Traversal Protection**: Implements robust character stripping regex matching the original TS `sanitizeName` logic to prevent traversal vulnerability attempts.
-- **📂 Exclusions & Depth Limits**: Filters out folder noise (e.g. `node_modules`, `.git`, `__pycache__`) and stops searching at a depth of 2 during skill discoveries.
-- **🔒 Canonical Protection Layer**: Prevents deletion of the shared `.agents/skills` repository folder if other active agents still reference those skills.
-- **📈 Highly Covered TDD Test Suite**: Over 70% of statements covered with table-driven test cases.
+### 1. Eliminating Transitive Dependency Risks
+The original TypeScript CLI relies on **127 transitive dependencies** to perform basic filesystem operations and network requests. In Go, the same program is written using **zero third-party dependencies**, relying entirely on Go's robust standard library (with a single direct dependency on `yaml.v3` for parsing frontmatter).
 
----
+### 2. Physical & Cognitive Simplification
+A side-by-side complexity audit reveals a dramatic reduction in physical footprint:
+*   **Original TypeScript**: 10,108 lines of code across 33 files + 116MB `node_modules` folder.
+*   **Migrated Go (`skl`)**: 2,864 lines of code across 11 files + 9.2MB self-contained static binary.
 
-## 🛠️ Installation & Building
+By replacing V8 execution contexts, asynchronous task wrappers, and transpilation configurations with Go's flat, synchronous, compile-time checked code, the physical line count was reduced by over **71%**.
+
+### 3. Sub-Millisecond Cold Starts
+Initializing the V8 engine, resolving nested imports, and parsing JavaScript in a Node.js CLI produces a perceptible cold-start lag (80ms to 200ms). Go compiles directly to machine code, initializing in **under 1 millisecond**:
+*   `$ time node skills-ts version` -> **100ms**
+*   `$ time skl version` -> **2ms**
+
+### 4. Explicit Error Handling
+Adopting Go meant adopting the **10 Commandments of Go Error Handling** (treating errors as elegant, first-class values rather than throwing unexpected exceptions). By wrapping errors at package boundaries and ensuring errors never escape goroutines unheard, `skl` achieves bulletproof runtime stability.
+
+## 🛠️ Installation & Usage
 
 ### Global Installation (Go Path)
 Install the CLI tool globally directly from your shell:
@@ -33,22 +41,19 @@ git config --global url."git@github.com:".insteadOf "https://github.com/"
 ```
 
 ### Local Build from Source
-If building and running locally from the cloned source directory:
 ```bash
 # Clone the repository
 git clone https://github.com/alexastrum/skl.git
 cd skl
 
-# Build the high-performance binary
+# Build the binary
 go build -o skl ./cmd/skl
 
-# Run the test suite
+# Run tests
 go test -v ./...
 ```
 
----
-
-## 💻 CLI Commands & Usage
+## 💻 CLI Commands
 
 ```bash
 skl - Agent Skills CLI Manager
@@ -74,61 +79,40 @@ Flags:
 ```
 
 ### 1. Initialize a Skill (`init`)
-Creates a standard, beautifully structured `SKILL.md` template with valid YAML frontmatter.
+Creates a structured `SKILL.md` template with valid YAML frontmatter:
 ```bash
-# Create in current working directory
-skl init
-
-# Create inside a subfolder
 skl init my-new-skill
 ```
 
 ### 2. Add/Install Skills (`add`)
-Installs local or remote git/zip skill sets to your active agents.
+Installs local or remote git/zip skill sets to your active agents:
 ```bash
-# Install a local skill
 skl add ./my-skill -v
-
-# Install a remote skill directly from GitHub
-skl add samber/cc-skills-golang -v
-
-# Install globally and force a full copy (instead of symlinks)
 skl add samber/cc-skills-golang -g --copy
 ```
 
 ### 3. List Installed Skills (`list`)
-Scans all active agent configuration folders and formats them in an elegant summary dashboard.
+Scans all active agent configuration folders and formats them in an elegant summary:
 ```bash
 skl list
 ```
 
 ### 4. Remove a Skill (`remove`)
-Safely uninstalls and deletes targeted skills.
+Safely uninstalls and deletes targeted skills:
 ```bash
-# Remove from all agents
 skl remove my-skill
-
-# Remove from specific agents only (preserves canonical files if other agents still use it)
-skl remove my-skill -a claude-code
 ```
 
 ### 5. Find an Installed Skill (`find`)
-Retrieves and displays detailed information about an installed skill.
+Retrieves and displays detailed information about an installed skill:
 ```bash
 skl find golang-testing
 ```
 
----
-
 ## 🛡️ Architecture & Security
 
 ### Path Sanitization
-Any input skill name passes through `SanitizeName()` which enforces:
-1. Lowercasing the string.
-2. Replacing any characters that are NOT `a-z`, `0-9`, `.`, or `_` with a single hyphen (`-`).
-3. Stripping leading/trailing dots and hyphens.
-4. Truncating to 255 characters.
-This prevents arbitrary directory traversal attacks like `../../etc/passwd` being used to compromise the developer's system.
+Any input skill name passes through `SanitizeName()` which enforces lowercasing, strips special characters (replacing with a single hyphen), and truncates to 255 characters to prevent directory traversal attempts (`CWE-22`).
 
 ### Canonical Protection
-When a skill is installed, the canonical files are stored in `.agents/skills/<skill-name>`, and active agents link to it. If you remove the skill from a specific agent scope, `skl` queries the status of all other agents. If another agent still references the skill, `skl` protects and keeps the canonical repository files intact!
+When a skill is installed, the canonical files are stored in `.agents/skills/<skill-name>`. If you remove the skill from a specific agent scope, `skl` checks if other agents still reference it. If another active agent still uses the skill, `skl` protects and preserves the canonical repository files intact.

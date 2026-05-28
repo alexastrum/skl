@@ -4,7 +4,7 @@
 
 Each agent defines its own configuration directories, skills folder mappings, and active detection algorithms. At runtime, `skl` dynamically evaluates your local filesystem and active environment variables to determine which agents are installed, allowing it to route, copy, and link your skills seamlessly.
 
----
+
 
 ## 📂 Mapped Agents & Environments
 
@@ -22,7 +22,7 @@ The following table summarizes a selection of key agents supported by `skl`:
 | **`copilot`** | Copilot | `.copilot/skills` | `~/.config/github-copilot/skills` | Detects `.config/github-copilot` folder |
 | **`windsurf`** | Windsurf | `.windsurf/skills` | `~/.config/Windsurf/User/skills` | Detects `.config/Windsurf` folder |
 
----
+
 
 ## ⚡ Active Discovery & Detection Mechanics
 
@@ -50,7 +50,7 @@ Leverages system environment variables to locate configuration files correctly o
 - `APPDATA` & `LOCALAPPDATA` (for Windows registry paths)
 - `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `VIBE_HOME` for specialized developer setups.
 
----
+
 
 ## 🔗 How Symlink Mappings are Routed
 
