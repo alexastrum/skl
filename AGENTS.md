@@ -1,10 +1,12 @@
-# Agent configurations and discovery in skl
+# 🤖 Agent Configurations & Discovery in skl
 
-`skl` supports over 40 agent environments, including major IDE plugins, standalone clients, CLI tools, and development assistants. 
+`skl` provides first-class support for **40+ Agent environments**, including major IDE plugins, standalone clients, CLI agents, and development assistants. 
 
-Each agent defines its own configuration directories, skills folder mappings, and active detection rules. At runtime, `skl` dynamically evaluates your local filesystem and active environment variables to determine which agents are installed, allowing it to route, copy, and link your skills.
+Each agent defines its own configuration directories, skills folder mappings, and active detection algorithms. At runtime, `skl` dynamically evaluates your local filesystem and active environment variables to determine which agents are installed, allowing it to route, copy, and link your skills seamlessly.
 
-## Mapped agents and environments
+
+
+## 📂 Mapped Agents & Environments
 
 The following table summarizes a selection of key agents supported by `skl`:
 
@@ -20,7 +22,9 @@ The following table summarizes a selection of key agents supported by `skl`:
 | **`copilot`** | Copilot | `.copilot/skills` | `~/.config/github-copilot/skills` | Detects `.config/github-copilot` folder |
 | **`windsurf`** | Windsurf | `.windsurf/skills` | `~/.config/Windsurf/User/skills` | Detects `.config/Windsurf` folder |
 
-## Active discovery and detection mechanics
+
+
+## ⚡ Active Discovery & Detection Mechanics
 
 In `skl`, discovery is handled via the `DetectInstalled` callback inside `AgentConfig`. 
 At runtime, when no specific agent is targeted, `skl` executes the following algorithm:
@@ -37,16 +41,18 @@ func detectInstalledAgents(home, configHome, cwd string) []AgentType {
 }
 ```
 
-### 1. Active project-level detection
+### 1. Active Project-Level Detection
 Checks if the current project workspace directory (`cwd`) contains active agent folders (e.g. `.cursor/`, `.cline/`, `.zed/`, `.aider.conf.yml`, etc.). If so, that agent is immediately considered active for the project, and any newly added skills are linked into their respective local directories.
 
-### 2. Environment variables and global detection
+### 2. Environment Variables & Global Detection
 Leverages system environment variables to locate configuration files correctly on macOS, Linux, and Windows:
 - `XDG_CONFIG_HOME` (falls back to `~/.config` on UNIX)
 - `APPDATA` & `LOCALAPPDATA` (for Windows registry paths)
 - `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `VIBE_HOME` for specialized developer setups.
 
-## How symlink mappings are routed
+
+
+## 🔗 How Symlink Mappings are Routed
 
 When you add a skill, `skl` automatically resolves the correct link targets:
 
@@ -65,4 +71,4 @@ graph TD
     G --> I[.zed/skills/my-skill -> ../../.agents/skills/my-skill]
 ```
 
-This design guarantees that files are never duplicated, updates apply universally to all agents, and resources are kept light and secure.
+This elegant design guarantees that files are never duplicated, updates apply universally to all agents, and resources are kept light and secure!
