@@ -19,7 +19,7 @@ func InitSkill(opts InitOptions) (string, error) {
 		var err error
 		cwd, err = os.Getwd()
 		if err != nil {
-			return "", fmt.Errorf("failed to get current working directory: %w", err)
+			return "", fmt.Errorf("get working directory: %w", err)
 		}
 	}
 
@@ -48,7 +48,7 @@ func InitSkill(opts InitOptions) (string, error) {
 	// Create directory if name was provided
 	if hasName {
 		if err := os.MkdirAll(skillDir, 0755); err != nil {
-			return "", fmt.Errorf("failed to create skill directory: %w", err)
+			return "", fmt.Errorf("create skill directory: %w", err)
 		}
 	}
 
@@ -73,7 +73,7 @@ Describe when this skill should be used.
 `, skillName, skillName)
 
 	if err := os.WriteFile(skillFile, []byte(skillContent), 0644); err != nil {
-		return "", fmt.Errorf("failed to write SKILL.md: %w", err)
+		return "", fmt.Errorf("write skill template: %w", err)
 	}
 
 	return skillFile, nil

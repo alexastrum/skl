@@ -169,7 +169,7 @@ func AddSkill(src string, opts AddOptions, cwd string) error {
 		var err error
 		cwd, err = os.Getwd()
 		if err != nil {
-			return fmt.Errorf("failed to get current working directory: %w", err)
+			return fmt.Errorf("get working directory: %w", err)
 		}
 	}
 
@@ -240,10 +240,10 @@ func AddSkill(src string, opts AddOptions, cwd string) error {
 		for _, agentType := range targetAgents {
 			res, err := installSkillForAgent(skillName, dir, agentType, opts, cwd)
 			if err != nil {
-				return fmt.Errorf("failed to install skill for agent %s: %w", agentType, err)
+				return fmt.Errorf("install skill for agent %s: %w", agentType, err)
 			}
 			if !res.Success {
-				return fmt.Errorf("failed to install skill %q for agent %s: %s", skillName, agentType, res.Error)
+				return fmt.Errorf("install skill %q for agent %s: %s", skillName, agentType, res.Error)
 			}
 			if opts.Verbose {
 				status := "Installed"
@@ -427,7 +427,7 @@ func downloadRemote(repoURL string, ref string, opts AddOptions) (string, error)
 	resp, err := http.Get(zipURL)
 	if err != nil {
 		_ = os.RemoveAll(tmpDir)
-		return "", fmt.Errorf("failed to fetch from remote URL: %w", err)
+		return "", fmt.Errorf("fetch remote: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -453,7 +453,7 @@ func downloadRemote(repoURL string, ref string, opts AddOptions) (string, error)
 
 	if err := extractZip(resp.Body, tmpDir, verbose); err != nil {
 		_ = os.RemoveAll(tmpDir)
-		return "", fmt.Errorf("failed to extract downloaded zip: %w", err)
+		return "", fmt.Errorf("extract zip: %w", err)
 	}
 
 	return tmpDir, nil

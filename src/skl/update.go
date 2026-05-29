@@ -55,12 +55,12 @@ func UpdateSkill(name string, srcDir string, opts UpdateOptions) error {
 	skillMd := filepath.Join(skillDir, "SKILL.md")
 	bytes, err := os.ReadFile(skillMd)
 	if err != nil {
-		return fmt.Errorf("failed to read installed SKILL.md: %w", err)
+		return fmt.Errorf("read installed skill: %w", err)
 	}
 
 	// Write the exact same bytes back to update modification time and ensure write access
 	if err := os.WriteFile(skillMd, bytes, 0644); err != nil {
-		return fmt.Errorf("failed to refresh SKILL.md: %w", err)
+		return fmt.Errorf("refresh skill: %w", err)
 	}
 
 	return nil

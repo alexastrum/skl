@@ -11,13 +11,13 @@ func RestoreFromLock(args []string, cwd string) error {
 		var err error
 		cwd, err = os.Getwd()
 		if err != nil {
-			return fmt.Errorf("failed to get working directory: %w", err)
+			return fmt.Errorf("get working directory: %w", err)
 		}
 	}
 
 	lock, err := ReadLocalLock(cwd)
 	if err != nil {
-		return fmt.Errorf("failed to read local lock file: %w", err)
+		return fmt.Errorf("read lock: %w", err)
 	}
 
 	if len(lock.Skills) == 0 {

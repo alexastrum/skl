@@ -100,7 +100,7 @@ func SyncSkills(args []string, opts SyncOptions, cwd string) error {
 		var err error
 		cwd, err = os.Getwd()
 		if err != nil {
-			return fmt.Errorf("failed to get working directory: %w", err)
+			return fmt.Errorf("get working directory: %w", err)
 		}
 	}
 
@@ -109,7 +109,7 @@ func SyncSkills(args []string, opts SyncOptions, cwd string) error {
 	}
 	discovered, err := DiscoverNodeModuleSkills(cwd)
 	if err != nil {
-		return fmt.Errorf("failed to discover node_modules skills: %w", err)
+		return fmt.Errorf("discover node_modules skills: %w", err)
 	}
 
 	if len(discovered) == 0 {
@@ -121,7 +121,7 @@ func SyncSkills(args []string, opts SyncOptions, cwd string) error {
 
 	lock, err := ReadLocalLock(cwd)
 	if err != nil {
-		return fmt.Errorf("failed to read local lock: %w", err)
+		return fmt.Errorf("read lock: %w", err)
 	}
 
 	canonicalBase := GetCanonicalSkillsDir(false, cwd)

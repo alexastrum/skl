@@ -75,7 +75,7 @@ func RemoveSkills(skillNames []string, opts RemoveOptions, cwd string) error {
 		var err error
 		cwd, err = os.Getwd()
 		if err != nil {
-			return fmt.Errorf("failed to get working directory: %w", err)
+			return fmt.Errorf("get working directory: %w", err)
 		}
 	}
 
@@ -101,7 +101,7 @@ func RemoveSkills(skillNames []string, opts RemoveOptions, cwd string) error {
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("failed to resolve user home: %w", err)
+		return fmt.Errorf("resolve user home: %w", err)
 	}
 
 	configHome := os.Getenv("XDG_CONFIG_HOME")
