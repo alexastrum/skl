@@ -55,6 +55,28 @@ go build -o skl
 go test -v ./...
 ```
 
+### Running Unsigned Release Binaries
+If you install `skl` using `go install github.com/alexastrum/skl@latest` or compile it from source, the binary will be built natively on your system and runs without issues. 
+
+However, if you download the pre-compiled release executables from GitHub, they are unsigned. Depending on your operating system, security filters may prevent them from launching.
+
+#### macOS (Gatekeeper Quarantine)
+When you download and try to execute the unsigned macOS binary, Apple Gatekeeper may quarantine the file and display an error ("'skl-darwin-arm64' is damaged and can’t be opened" or "developer cannot be verified").
+* **Command Line Bypass**: To remove the quarantine attribute, run the following command in your terminal:
+  ```bash
+  xattr -d com.apple.quarantine ./skl-darwin-arm64
+  ```
+* **System Settings Bypass**: Alternatively, navigate to **System Settings > Privacy & Security**, scroll down to the Security section, and click **Allow Anyway** next to the warning for `skl`.
+
+#### Windows (SmartScreen Filter)
+When running the unsigned Windows executable (`skl-windows-amd64.exe`), Windows Defender SmartScreen may display a warning ("Windows protected your PC").
+* **Manual Bypass**: Click on **More info** inside the SmartScreen dialog, then click **Run anyway**.
+* **PowerShell Bypass**: Alternatively, unblock the file using PowerShell:
+  ```powershell
+  Unblock-File -Path .\skl-windows-amd64.exe
+  ```
+
+
 ## CLI commands
 
 ```bash

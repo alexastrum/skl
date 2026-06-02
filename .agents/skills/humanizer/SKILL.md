@@ -60,7 +60,7 @@ If the user provides a writing sample (their own previous writing), analyze it b
 
 Avoiding AI patterns is only half the job. Sterile, voiceless writing is just as obvious as slop. Good writing has a human behind it.
 
-**Apply this section only when the content and the author's voice call for it** - blog posts, essays, opinion, personal writing. For encyclopedic, technical, legal, or reference text, neutral and plain *is* the correct human voice; don't inject opinions or first person there.
+**Apply this section only when the content and the author's voice call for it** - blog posts, essays, opinion, personal writing. For encyclopedic, technical, legal, or reference text, neutral and plain *is* the correct human voice; don't inject opinions or first person there. Academic/expository texts use nouns and third-person pronouns for semantic precision, keeping pronoun density lower (approximately 5% of word tokens). By contrast, conversational and narrative styles use first- and second-person pronouns much more heavily (reaching approximately 18% of word tokens). Maintain a natural pronoun balance by aligning usage with register: focus on first- and second-person (I, you, we) for actionable steps, first- and third-person (I, the developer) for storytelling, and strict third-person (the system, the compiler) for objective reference documentation.
 
 ### Signs of soulless writing (even if technically "clean"):
 - Every sentence is the same length and structure
@@ -499,6 +499,23 @@ Before returning the final rewrite, scan it for `—` and `–`. Any hit means t
 > ## The Cost of Dependencies
 > ### Readability
 > #### Baseline Cold Start
+
+
+### 32. Horizontal Rules: Cut Them
+
+**Problem:** AI chatbots frequently insert horizontal rules (`---`) as section separators to format text mechanically. Humans use spacing and headings to structure content.
+
+**Before:**
+> Here is the first section.
+>
+> ---
+>
+> ## Second Section
+
+**After:**
+> Here is the first section.
+>
+> ## Second Section
 
 
 ## DETECTION GUIDANCE
