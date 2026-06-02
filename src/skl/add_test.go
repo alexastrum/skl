@@ -219,10 +219,15 @@ func TestAddSkill_DepthAndExclusion(t *testing.T) {
 	_ = os.MkdirAll(sub2, 0755)
 	_ = os.WriteFile(filepath.Join(sub2, "SKILL.md"), []byte("---\nname: depth-two\n---\n"), 0644)
 
-	// Depth 3 (Should be skipped)
-	sub3 := filepath.Join(sub2, "sub3")
-	_ = os.MkdirAll(sub3, 0755)
-	_ = os.WriteFile(filepath.Join(sub3, "SKILL.md"), []byte("---\nname: depth-three\n---\n"), 0644)
+	// Depth 5 (Should be scanned in recursive/full depth)
+	sub5 := filepath.Join(srcDir, "d1", "d2", "d3", "d4", "d5")
+	_ = os.MkdirAll(sub5, 0755)
+	_ = os.WriteFile(filepath.Join(sub5, "SKILL.md"), []byte("---\nname: depth-five\n---\n"), 0644)
+
+	// Depth 6 (Should be skipped as it exceeds maxDepth 5)
+	sub6 := filepath.Join(sub5, "d6")
+	_ = os.MkdirAll(sub6, 0755)
+	_ = os.WriteFile(filepath.Join(sub6, "SKILL.md"), []byte("---\nname: depth-six\n---\n"), 0644)
 
 	// Excluded directories (Should be skipped)
 	nodeMods := filepath.Join(srcDir, "node_modules")
@@ -233,17 +238,25 @@ func TestAddSkill_DepthAndExclusion(t *testing.T) {
 	_ = os.MkdirAll(dotGit, 0755)
 	_ = os.WriteFile(filepath.Join(dotGit, "SKILL.md"), []byte("---\nname: ignored-git\n---\n"), 0644)
 
-	dirs := findSkillDirectories(srcDir, false)
+	// Test Case 1: Root SKILL.md present, fullDepth = false
+	// Expected: returns only the root skill (early return)
+	dirs1 := findSkillDirectories(srcDir, false)
+	if len(dirs1) != 1 || filepath.Base(dirs1[0]) != "src-root" {
+		t.Errorf("expected only root dir 'src-root' to be returned when fullDepth is false, got: %v", dirs1)
+	}
 
-	// Verify depth-zero, depth-one, and depth-two are found, but others are excluded
+	// Test Case 2: Root SKILL.md present, fullDepth = true
+	// Expected: returns root + nested skills up to depth 5
+	dirs2 := findSkillDirectories(srcDir, true)
 	hasZero := false
 	hasOne := false
 	hasTwo := false
-	hasThree := false
+	hasFive := false
+	hasSix := false
 	hasNode := false
 	hasGit := false
 
-	for _, d := range dirs {
+	for _, d := range dirs2 {
 		base := filepath.Base(d)
 		if base == "src-root" {
 			hasZero = true
@@ -251,8 +264,10 @@ func TestAddSkill_DepthAndExclusion(t *testing.T) {
 			hasOne = true
 		} else if base == "sub2" {
 			hasTwo = true
-		} else if base == "sub3" {
-			hasThree = true
+		} else if base == "d5" {
+			hasFive = true
+		} else if base == "d6" {
+			hasSix = true
 		} else if base == "node_modules" {
 			hasNode = true
 		} else if base == ".git" {
@@ -260,23 +275,42 @@ func TestAddSkill_DepthAndExclusion(t *testing.T) {
 		}
 	}
 
-	if !hasZero {
-		t.Error("expected depth 0 directory to be scanned")
+	if !hasZero || !hasOne || !hasTwo || !hasFive {
+		t.Errorf("expected depth 0, 1, 2, and 5 to be found, got: %v", dirs2)
 	}
-	if !hasOne {
-		t.Error("expected depth 1 directory to be scanned")
+	if hasSix {
+		t.Error("expected depth 6 directory to be EXCLUDED (exceeded maxDepth 5)")
 	}
-	if !hasTwo {
-		t.Error("expected depth 2 directory to be scanned")
+	if hasNode || hasGit {
+		t.Error("expected node_modules and .git directories to be EXCLUDED")
 	}
-	if hasThree {
-		t.Error("expected depth 3 directory to be EXCLUDED (exceeded depth limit of 2)")
+
+	// Test Case 3: No root SKILL.md, and no priority-level skills
+	// Expected: falls back to priority and recursive searches finding nested skills up to depth 5
+	_ = os.Remove(filepath.Join(srcDir, "SKILL.md"))
+	_ = os.Remove(filepath.Join(sub1, "SKILL.md")) // Remove depth 1 skill so priority search finds nothing
+	dirs3 := findSkillDirectories(srcDir, false)
+
+	hasTwo = false
+	hasFive = false
+	hasSix = false
+
+	for _, d := range dirs3 {
+		base := filepath.Base(d)
+		if base == "sub2" {
+			hasTwo = true
+		} else if base == "d5" {
+			hasFive = true
+		} else if base == "d6" {
+			hasSix = true
+		}
 	}
-	if hasNode {
-		t.Error("expected node_modules directory to be EXCLUDED")
+
+	if !hasTwo || !hasFive {
+		t.Errorf("expected nested skills sub2 and d5 to be discovered via recursive fallback, got: %v", dirs3)
 	}
-	if hasGit {
-		t.Error("expected .git directory to be EXCLUDED")
+	if hasSix {
+		t.Error("expected depth 6 directory to be EXCLUDED (exceeded maxDepth 5)")
 	}
 }
 

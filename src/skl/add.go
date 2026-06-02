@@ -517,29 +517,135 @@ func extractZip(body io.Reader, dest string, verbose bool) error {
 
 func findSkillDirectories(dir string, fullDepth bool) []string {
 	var results []string
-	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	seenNames := make(map[string]bool)
+
+	skipDirs := map[string]bool{
+		"node_modules": true,
+		".git":         true,
+		"dist":         true,
+		"build":        true,
+		"__pycache__":  true,
+	}
+
+	hasSkillMd := func(path string) bool {
+		_, err := os.Stat(filepath.Join(path, "SKILL.md"))
+		return err == nil
+	}
+
+	tryAddSkillAt := func(skillDir string) bool {
+		if !hasSkillMd(skillDir) {
+			return false
+		}
+		// Read frontmatter to get name
+		bytes, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
 		if err != nil {
-			return nil
+			return false
 		}
-		if info.IsDir() {
-			name := info.Name()
-			if name == ".git" || name == "node_modules" {
-				return filepath.SkipDir
+		data, _, err := ParseFrontmatter(string(bytes))
+		if err != nil {
+			return false
+		}
+		name, _ := data["name"].(string)
+		if name == "" {
+			return false
+		}
+		name = strings.ToLower(name)
+		if seenNames[name] {
+			return true // Return true since it is a valid skill directory structure
+		}
+		seenNames[name] = true
+		results = append(results, skillDir)
+		return true
+	}
+
+	// 1. If pointing directly at a skill, add it and return (unless fullDepth is set)
+	if hasSkillMd(dir) {
+		tryAddSkillAt(dir)
+		if !fullDepth {
+			return results
+		}
+	}
+
+	// 2. Search common skill locations first
+	prioritySearchDirs := []string{
+		dir,
+		filepath.Join(dir, "skills"),
+		filepath.Join(dir, "skills", ".curated"),
+		filepath.Join(dir, "skills", ".experimental"),
+		filepath.Join(dir, "skills", ".system"),
+	}
+
+	// Add dynamic XDG/agent locations
+	seenPriorityDirs := make(map[string]bool)
+	for _, pDir := range prioritySearchDirs {
+		seenPriorityDirs[pDir] = true
+	}
+
+	for _, agent := range Agents {
+		if agent.SkillsDir != "" {
+			pDir := filepath.Join(dir, agent.SkillsDir)
+			if !seenPriorityDirs[pDir] {
+				prioritySearchDirs = append(prioritySearchDirs, pDir)
+				seenPriorityDirs[pDir] = true
 			}
-			if !fullDepth {
-				rel, err := filepath.Rel(dir, path)
-				if err == nil && rel != "." {
-					parts := strings.Split(filepath.ToSlash(rel), "/")
-					if len(parts) > 2 {
-						return filepath.SkipDir
-					}
+		}
+	}
+
+	for i, pDir := range prioritySearchDirs {
+		walkDeep := (i > 0)
+		entries, err := os.ReadDir(pDir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() || skipDirs[entry.Name()] {
+				continue
+			}
+			childDir := filepath.Join(pDir, entry.Name())
+			foundAtChild := tryAddSkillAt(childDir)
+
+			if foundAtChild || !walkDeep {
+				continue
+			}
+
+			// Walk one extra level for catalog layouts
+			grandEntries, err := os.ReadDir(childDir)
+			if err != nil {
+				continue
+			}
+			for _, grand := range grandEntries {
+				if !grand.IsDir() || skipDirs[grand.Name()] {
+					continue
 				}
+				tryAddSkillAt(filepath.Join(childDir, grand.Name()))
 			}
-		} else if info.Name() == "SKILL.md" {
-			results = append(results, filepath.Dir(path))
 		}
-		return nil
-	})
+	}
+
+	// 3. Fall back to recursive search if nothing found, or if fullDepth is set
+	if len(results) == 0 || fullDepth {
+		var findSkillDirsRecursive func(currentDir string, depth int)
+		findSkillDirsRecursive = func(currentDir string, depth int) {
+			if depth > 5 {
+				return
+			}
+			if hasSkillMd(currentDir) {
+				tryAddSkillAt(currentDir)
+			}
+			entries, err := os.ReadDir(currentDir)
+			if err != nil {
+				return
+			}
+			for _, entry := range entries {
+				if !entry.IsDir() || skipDirs[entry.Name()] {
+					continue
+				}
+				findSkillDirsRecursive(filepath.Join(currentDir, entry.Name()), depth+1)
+			}
+		}
+		findSkillDirsRecursive(dir, 0)
+	}
+
 	return results
 }
 
