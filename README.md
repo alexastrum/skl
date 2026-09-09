@@ -56,7 +56,7 @@ go test -v ./...
 ```
 
 ### Running Unsigned Release Binaries
-If you install `skl` using `go install github.com/alexastrum/skl@latest` or compile it from source, the binary will be built natively on your system and runs without issues. 
+If you install `skl` using `go install github.com/alexastrum/skl@latest` or compile it from source, the binary will be built natively on your system and runs without issues.
 
 However, if you download the pre-compiled release executables from GitHub, they are unsigned. Depending on your operating system, security filters may prevent them from launching.
 
@@ -140,17 +140,20 @@ skl find golang-testing
 *   **Comprehensive safety**: Enforces directory-traversal protection and filename sanitization at every step.
 *   **Flexible scopes**: Targets individual projects or acts as a global system-wide registry with `-g`.
 
-## Supported Agents (51+)
+## Supported Agents (71+)
 `skl` automatically detects and installs to any of these developer assistants and editors out of the box:
 
 <details>
-<summary><b>Click to expand full list of 51 supported agents</b></summary>
+<summary><b>Click to expand full list of 71 supported agents</b></summary>
 
 | Agent | `--agent` key | Project Folder | Global Folder |
 | :--- | :--- | :--- | :--- |
 | **AiderDesk** | `aider-desk` | `.aider-desk/skills/` | `~/.aider-desk/skills/` |
 | **Antigravity** | `antigravity` | `.agents/skills/` | `~/.gemini/antigravity/skills/` |
+| **Antigravity CLI** | `antigravity-cli` | `.agents/skills/` | `~/.gemini/antigravity-cli/skills/` |
+| **AstrBot** | `astrbot` | `data/skills/` | `~/.astrbot/data/skills/` |
 | **Augment** | `augment` | `.augment/skills/` | `~/.augment/skills/` |
+| **Autohand Code CLI** | `autohand-code` | `.autohand/skills/` | `~/.autohand/skills/` |
 | **IBM Bob** | `bob` | `.bob/skills/` | `~/.bob/skills/` |
 | **Claude Code** | `claude-code` | `.claude/skills/` | `~/.claude/skills/` |
 | **OpenClaw** | `openclaw` | `skills/` | `~/.openclaw/skills/` |
@@ -169,29 +172,49 @@ skl find golang-testing
 | **Droid** | `droid` | `.factory/skills/` | `~/.factory/skills/` |
 | **Firebender** | `firebender` | `.agents/skills/` | `~/.firebender/skills/` |
 | **ForgeCode** | `forgecode` | `.forge/skills/` | `~/.forge/skills/` |
+| **fx** | `fx` | `.fx/skills/` | `~/.fx/skills/` |
 | **Gemini CLI** | `gemini-cli` | `.agents/skills/` | `~/.gemini/skills/` |
 | **GitHub Copilot** | `github-copilot` | `.agents/skills/` | `~/.copilot/skills/` |
 | **Goose** | `goose` | `.goose/skills/` | `~/.config/goose/skills/` |
+| **Grok Build** | `grok` | `.grok/skills/` | `~/.grok/skills/` |
 | **Hermes Agent** | `hermes-agent` | `.hermes/skills/` | `~/.hermes/skills/` |
+| **inference.sh** | `inference-sh` | `.inferencesh/skills/` | `~/.inferencesh/skills/` |
 | **Junie** | `junie` | `.junie/skills/` | `~/.junie/skills/` |
 | **iFlow CLI** | `iflow-cli` | `.iflow/skills/` | `~/.iflow/skills/` |
+| **Jazz** | `jazz` | `.jazz/skills/` | `~/.jazz/skills/` |
 | **Kilo Code** | `kilo` | `.kilocode/skills/` | `~/.kilocode/skills/` |
+| **Kimchi** | `kimchi` | `.kimchi/skills/` | `~/.config/kimchi/harness/skills/` |
+| **Kimi Code CLI** | `kimi-code-cli` | `.agents/skills/` | `~/.agents/skills/` |
 | **Kiro CLI** | `kiro-cli` | `.kiro/skills/` | `~/.kiro/skills/` |
 | **Kode** | `kode` | `.kode/skills/` | `~/.kode/skills/` |
+| **Lingma** | `lingma` | `.lingma/skills/` | `~/.lingma/skills/` |
+| **Loaf** | `loaf` | `.agents/skills/` | `~/.agents/skills/` |
 | **MCPJam** | `mcpjam` | `.mcpjam/skills/` | `~/.mcpjam/skills/` |
+| **MiniMax Code** | `minimax-code` | `.minimax/skills/` | `~/.minimax/skills/` |
 | **Mistral Vibe** | `mistral-vibe` | `.vibe/skills/` | `~/.vibe/skills/` |
+| **Moxby** | `moxby` | `.moxby/skills/` | `~/.moxby/skills/` |
 | **Mux** | `mux` | `.mux/skills/` | `~/.mux/skills/` |
+| **Ona** | `ona` | `.ona/skills/` | `~/.ona/skills/` |
 | **OpenCode** | `opencode` | `.agents/skills/` | `~/.config/opencode/skills/` |
 | **OpenHands** | `openhands` | `.openhands/skills/` | `~/.openhands/skills/` |
 | **Pi** | `pi` | `.pi/skills/` | `~/.pi/agent/skills/` |
+| **Posit Assistant** | `posit-assistant` | `.posit/assistant/skills/` | `~/.posit/assistant/skills/` |
+| **PromptScript** | `promptscript` | `.agents/skills/` | (no global support) |
 | **Qoder** | `qoder` | `.qoder/skills/` | `~/.qoder/skills/` |
+| **Qoder CN** | `qoder-cn` | `.qoder/skills/` | `~/.qoder-cn/skills/` |
 | **Qwen Code** | `qwen-code` | `.qwen/skills/` | `~/.qwen/skills/` |
+| **Reasonix** | `reasonix` | `.reasonix/skills/` | `~/.reasonix/skills/` |
 | **Rovo Dev** | `rovodev` | `.rovodev/skills/` | `~/.rovodev/skills/` |
 | **Roo Code** | `roo` | `.roo/skills/` | `~/.roo/skills/` |
+| **Sarvam Code** | `sarvam-code` | `.agents/skills/` | `~/.agents/skills/` |
 | **Tabnine CLI** | `tabnine-cli` | `.tabnine/agent/skills/` | `~/.tabnine/agent/skills/` |
+| **Terramind** | `terramind` | `.terramind/skills/` | `~/.terramind/skills/` |
+| **Tinycloud** | `tinycloud` | `.tinycloud/skills/` | `~/.tinycloud/skills/` |
 | **Trae / Trae CN** | `trae` / `trae-cn` | `.trae/skills/` | `~/.trae/skills/` / `~/.trae-cn/skills/` |
 | **Windsurf** | `windsurf` | `.windsurf/skills/` | `~/.codeium/windsurf/skills/` |
+| **ZCode** | `zcode` | `.zcode/skills/` | `~/.zcode/skills/` |
 | **Zencoder** | `zencoder` | `.zencoder/skills/` | `~/.zencoder/skills/` |
+| **Zenflow** | `zenflow` | `.zencoder/skills/` | `~/.zencoder/skills/` |
 | **Neovate** | `neovate` | `.neovate/skills/` | `~/.neovate/skills/` |
 | **Pochi** | `pochi` | `.pochi/skills/` | `~/.pochi/skills/` |
 | **AdaL** | `adal` | `.adal/skills/` | `~/.adal/skills/` |
