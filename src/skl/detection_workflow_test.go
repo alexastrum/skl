@@ -83,7 +83,7 @@ func createAgentMarker(t *testing.T, agent AgentType, home, configHome, cwd stri
 		_ = os.MkdirAll(filepath.Join(home, ".iflow"), 0755)
 	case "kilo":
 		_ = os.MkdirAll(filepath.Join(home, ".kilocode"), 0755)
-	case "kimi-cli":
+	case "kimi-code-cli":
 		_ = os.MkdirAll(filepath.Join(home, ".kimi"), 0755)
 	case "kiro-cli":
 		_ = os.MkdirAll(filepath.Join(home, ".kiro"), 0755)
@@ -261,7 +261,7 @@ func TestIntegration_SupportForAllAgentsButOne(t *testing.T) {
 		"codearts-agent", "codebuddy", "codemaker", "codestudio", "command-code",
 		"continue", "cortex", "crush", "cursor", "deepagents", "devin", "dexto",
 		"droid", "firebender", "forgecode", "gemini-cli", "github-copilot", "goose",
-		"hermes-agent", "junie", "iflow-cli", "kilo", "kimi-cli", "kiro-cli", "kode",
+		"hermes-agent", "junie", "iflow-cli", "kilo", "kimi-code-cli", "kiro-cli", "kode",
 		"mcpjam", "mux", "opencode", "openhands", "pi", "qoder", "qwen-code", "replit",
 		"rovodev", "roo", "tabnine-cli", "trae", "trae-cn", "warp", "windsurf", "zed",
 		"zencoder", "neovate", "pochi", "adal",
@@ -414,7 +414,7 @@ func TestIntegration_SupportForNonParameterizedAgents(t *testing.T) {
 
 	// Mock Agents map
 	Agents = make(map[AgentType]AgentConfig)
-	
+
 	// Define a mock claude-code (non-parameterized agent) with DetectInstalled checking our sandbox
 	Agents["claude-code"] = AgentConfig{
 		Name:            "claude-code",

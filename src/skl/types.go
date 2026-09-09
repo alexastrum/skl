@@ -415,14 +415,14 @@ func init() {
 				return exists(filepath.Join(h, ".kilocode"))
 			},
 		},
-		"kimi-cli": {
-			Name:                "kimi-cli",
+		"kimi-code-cli": {
+			Name:                "kimi-code-cli",
 			DisplayName:         "Kimi Code CLI",
 			SkillsDir:           ".agents/skills",
-			GlobalSkillsDir:     filepath.Join(home, ".config/agents/skills"),
+			GlobalSkillsDir:     filepath.Join(home, ".agents/skills"),
 			ShowInUniversalList: true,
 			DetectInstalled: func(h, c, w string) bool {
-				return exists(filepath.Join(h, ".kimi"))
+				return exists(filepath.Join(h, ".kimi-code")) || exists(filepath.Join(h, ".kimi"))
 			},
 		},
 		"kiro-cli": {
@@ -664,6 +664,229 @@ func init() {
 			GlobalSkillsDir:     filepath.Join(configHome, "agents/skills"),
 			ShowInUniversalList: false,
 			DetectInstalled:     func(h, c, w string) bool { return false },
+		},
+
+		// The following agents were ported from upstream vercel-labs/skills agents.ts
+		// as part of the golang-how-to wayfinder map (mgoodness/skl#4, ticket #6).
+		"antigravity-cli": {
+			Name:                "antigravity-cli",
+			DisplayName:         "Antigravity CLI",
+			SkillsDir:           ".agents/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".gemini/antigravity-cli/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".gemini/antigravity-cli"))
+			},
+		},
+		"astrbot": {
+			Name:                "astrbot",
+			DisplayName:         "AstrBot",
+			SkillsDir:           "data/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".astrbot/data/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(w, "data/skills")) || exists(filepath.Join(h, ".astrbot"))
+			},
+		},
+		"autohand-code": {
+			Name:                "autohand-code",
+			DisplayName:         "Autohand Code CLI",
+			SkillsDir:           ".autohand/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".autohand/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".autohand"))
+			},
+		},
+		"fx": {
+			Name:                "fx",
+			DisplayName:         "fx",
+			SkillsDir:           ".fx/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".fx/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".fx"))
+			},
+		},
+		"grok": {
+			Name:                "grok",
+			DisplayName:         "Grok Build",
+			SkillsDir:           ".grok/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".grok/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".grok"))
+			},
+		},
+		"inference-sh": {
+			Name:                "inference-sh",
+			DisplayName:         "inference.sh",
+			SkillsDir:           ".inferencesh/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".inferencesh/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".inferencesh"))
+			},
+		},
+		"jazz": {
+			Name:                "jazz",
+			DisplayName:         "Jazz",
+			SkillsDir:           ".jazz/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".jazz/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".jazz")) || exists(filepath.Join(w, ".jazz"))
+			},
+		},
+		"kimchi": {
+			Name:                "kimchi",
+			DisplayName:         "Kimchi",
+			SkillsDir:           ".kimchi/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".config/kimchi/harness/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".config/kimchi"))
+			},
+		},
+		"lingma": {
+			Name:                "lingma",
+			DisplayName:         "Lingma",
+			SkillsDir:           ".lingma/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".lingma/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".lingma"))
+			},
+		},
+		"loaf": {
+			Name:                "loaf",
+			DisplayName:         "Loaf",
+			SkillsDir:           ".agents/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".agents/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".loaf"))
+			},
+		},
+		"minimax-code": {
+			Name:                "minimax-code",
+			DisplayName:         "MiniMax Code",
+			SkillsDir:           ".minimax/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".minimax/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".minimax")) || exists("/Applications/MiniMax Code.app")
+			},
+		},
+		"moxby": {
+			Name:                "moxby",
+			DisplayName:         "Moxby",
+			SkillsDir:           ".moxby/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".moxby/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".moxby"))
+			},
+		},
+		"ona": {
+			Name:                "ona",
+			DisplayName:         "Ona",
+			SkillsDir:           ".ona/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".ona/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".ona"))
+			},
+		},
+		"posit-assistant": {
+			Name:                "posit-assistant",
+			DisplayName:         "Posit Assistant",
+			SkillsDir:           ".posit/assistant/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".posit/assistant/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".posit/assistant")) || exists(filepath.Join(h, ".positai"))
+			},
+		},
+		"promptscript": {
+			Name:                "promptscript",
+			DisplayName:         "PromptScript",
+			SkillsDir:           ".agents/skills",
+			GlobalSkillsDir:     "",
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(w, ".promptscript")) || exists(filepath.Join(w, "promptscript.yaml"))
+			},
+		},
+		"qoder-cn": {
+			Name:                "qoder-cn",
+			DisplayName:         "Qoder CN",
+			SkillsDir:           ".qoder/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".qoder-cn/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".qoder-cn"))
+			},
+		},
+		"reasonix": {
+			Name:                "reasonix",
+			DisplayName:         "Reasonix",
+			SkillsDir:           ".reasonix/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".reasonix/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".reasonix"))
+			},
+		},
+		"sarvam-code": {
+			Name:                "sarvam-code",
+			DisplayName:         "Sarvam Code",
+			SkillsDir:           ".agents/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".agents/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".sarvam"))
+			},
+		},
+		"terramind": {
+			Name:                "terramind",
+			DisplayName:         "Terramind",
+			SkillsDir:           ".terramind/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".terramind/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".terramind"))
+			},
+		},
+		"tinycloud": {
+			Name:                "tinycloud",
+			DisplayName:         "Tinycloud",
+			SkillsDir:           ".tinycloud/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".tinycloud/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".tinycloud"))
+			},
+		},
+		"zcode": {
+			Name:                "zcode",
+			DisplayName:         "ZCode",
+			SkillsDir:           ".zcode/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".zcode/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".zcode")) || exists("/Applications/ZCode.app")
+			},
+		},
+		"zenflow": {
+			Name:                "zenflow",
+			DisplayName:         "Zenflow",
+			SkillsDir:           ".zencoder/skills",
+			GlobalSkillsDir:     filepath.Join(home, ".zencoder/skills"),
+			ShowInUniversalList: true,
+			DetectInstalled: func(h, c, w string) bool {
+				return exists(filepath.Join(h, ".zencoder"))
+			},
 		},
 	}
 
