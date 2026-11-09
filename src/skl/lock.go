@@ -8,14 +8,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // ErrInvalidLocalLock is returned when skills-lock.json exists on disk but is malformed,
@@ -23,6 +28,10 @@ import (
 var ErrInvalidLocalLock = errors.New("SKILLS_INVALID_LOCAL_LOCK")
 
 // SkillLockEntry represents a single installed skill entry in the global lock file (.skill-lock.json).
+// Field order is the JSON key order upstream writes: addSkillToLock spreads the caller's entry
+// ({source, sourceType, sourceUrl, ref, skillPath, skillFolderHash, pluginName, sourceBaseUrl,
+// wellKnownDigest, installMode}) and then appends installedAt and updatedAt, so the timestamps
+// always come last.
 type SkillLockEntry struct {
 	Source          string `json:"source"`
 	SourceType      string `json:"sourceType"`
@@ -30,13 +39,16 @@ type SkillLockEntry struct {
 	Ref             string `json:"ref,omitempty"`
 	SkillPath       string `json:"skillPath,omitempty"`
 	SkillFolderHash string `json:"skillFolderHash"`
-	InstalledAt     string `json:"installedAt"`
-	UpdatedAt       string `json:"updatedAt"`
 	PluginName      string `json:"pluginName,omitempty"`
 	SourceBaseUrl   string `json:"sourceBaseUrl,omitempty"`
 	WellKnownDigest string `json:"wellKnownDigest,omitempty"`
 	InstallMode     string `json:"installMode,omitempty"`
+	InstalledAt     string `json:"installedAt"`
+	UpdatedAt       string `json:"updatedAt"`
 }
+
+// lockTimestampFormat matches JavaScript's Date.prototype.toISOString() (UTC, milliseconds).
+const lockTimestampFormat = "2006-01-02T15:04:05.000Z"
 
 // DismissedPrompts tracks dismissed interactive prompts in the global lock file.
 type DismissedPrompts struct {
@@ -49,6 +61,17 @@ type SkillLockFile struct {
 	Skills             map[string]SkillLockEntry `json:"skills"`
 	Dismissed          *DismissedPrompts         `json:"dismissed,omitempty"`
 	LastSelectedAgents []string                  `json:"lastSelectedAgents,omitempty"`
+
+	// orig is the file as read from disk. WriteSkillLock uses it to keep what upstream's
+	// JSON.parse/JSON.stringify round trip keeps: unknown top-level and per-entry fields,
+	// key order, and the existing order of skills.
+	orig *globalLockOrig
+}
+
+// globalLockOrig records the parsed on-disk global lock alongside its typed decoding.
+type globalLockOrig struct {
+	top    *jsonObject
+	skills map[string]SkillLockEntry
 }
 
 // LocalSkillLockEntry represents a single entry in the project lock file (skills-lock.json).
@@ -64,7 +87,6 @@ type LocalSkillLockEntry struct {
 	Subagents       []string `json:"subagents,omitempty"`
 	WellKnownDigest string   `json:"wellKnownDigest,omitempty"`
 	InstallMode     string   `json:"installMode,omitempty"`
-	PluginName      string   `json:"pluginName,omitempty"`
 }
 
 // LocalSkillLockFile represents the local project lock file (skills-lock.json).
@@ -92,19 +114,24 @@ const (
 	LocalLockVer   = 1
 )
 
+// marshalPrettyJSON serializes v the way JavaScript's JSON.stringify(v, null, 2) does: no
+// HTML or U+2028/U+2029 escaping, ECMAScript number formatting, and integer-like object keys
+// first. Struct fields keep their declaration order; Go map keys are sorted.
 func marshalPrettyJSON(v interface{}, trailingNewline bool) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(v); err != nil {
+	compact, err := json.Marshal(v)
+	if err != nil {
 		return nil, err
 	}
-	out := buf.Bytes()
-	if !trailingNewline {
-		out = bytes.TrimSuffix(out, []byte("\n"))
+	parsed, err := parseOrderedJSON(compact)
+	if err != nil {
+		return nil, err
 	}
-	return out, nil
+	var buf bytes.Buffer
+	writeJSONStringify(&buf, parsed, "")
+	if trailingNewline {
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes(), nil
 }
 
 // GetSkillLockPath returns the path to the global skill lock file.
@@ -160,6 +187,15 @@ func readGlobalLockPath(path string) (SkillLockFile, error) {
 	if lock.Version < GlobalLockVer || lock.Skills == nil {
 		return createEmptyGlobalLock(), nil
 	}
+	if parsed, err := parseOrderedJSON(data); err == nil {
+		if top, ok := parsed.(*jsonObject); ok {
+			typed := make(map[string]SkillLockEntry, len(lock.Skills))
+			for k, v := range lock.Skills {
+				typed[k] = v
+			}
+			lock.orig = &globalLockOrig{top: top, skills: typed}
+		}
+	}
 	return lock, nil
 }
 
@@ -171,7 +207,120 @@ func createEmptyGlobalLock() SkillLockFile {
 	}
 }
 
+// origSkillsObject returns the on-disk "skills" object, or nil.
+func (lock SkillLockFile) origSkillsObject() *jsonObject {
+	if lock.orig == nil || lock.orig.top == nil {
+		return nil
+	}
+	v, _ := lock.orig.top.get("skills")
+	obj, _ := v.(*jsonObject)
+	return obj
+}
+
+// orderedSkillNames returns the skill names in the order JSON.stringify writes them: names
+// already in the file keep their position, new names are appended (sorted, for determinism),
+// and integer-like names move to the front as JavaScript objects order them.
+func (lock SkillLockFile) orderedSkillNames() []string {
+	names := make([]string, 0, len(lock.Skills))
+	seen := make(map[string]bool, len(lock.Skills))
+	if obj := lock.origSkillsObject(); obj != nil {
+		for _, k := range obj.keys {
+			if _, ok := lock.Skills[k]; ok && !seen[k] {
+				names = append(names, k)
+				seen[k] = true
+			}
+		}
+	}
+	var added []string
+	for k := range lock.Skills {
+		if !seen[k] {
+			added = append(added, k)
+		}
+	}
+	sort.Strings(added)
+	return jsOrderKeys(append(names, added...))
+}
+
+// globalLockJSON builds the ordered JSON document for lock, matching what upstream's
+// writeSkillLock produces after a readSkillLock/mutate cycle.
+func globalLockJSON(lock SkillLockFile) (*jsonObject, error) {
+	known := map[string]interface{}{
+		"version": json.Number(strconv.Itoa(lock.Version)),
+	}
+
+	skills := newJSONObject()
+	origSkills := lock.origSkillsObject()
+	for _, name := range lock.orderedSkillNames() {
+		entry := lock.Skills[name]
+		if origSkills != nil {
+			if prev, ok := lock.orig.skills[name]; ok && reflect.DeepEqual(prev, entry) {
+				if raw, ok := origSkills.get(name); ok {
+					skills.set(name, raw)
+					continue
+				}
+			}
+		}
+		v, err := toOrderedJSON(entry)
+		if err != nil {
+			return nil, err
+		}
+		skills.set(name, v)
+	}
+	known["skills"] = skills
+
+	var origTop *jsonObject
+	if lock.orig != nil {
+		origTop = lock.orig.top
+	}
+	if lock.Dismissed != nil {
+		dismissed := newJSONObject()
+		if origTop != nil {
+			if v, ok := origTop.get("dismissed"); ok {
+				if obj, ok := v.(*jsonObject); ok {
+					dismissed = obj.clone()
+				}
+			}
+		}
+		cur, _ := dismissed.get("findSkillsPrompt")
+		if lock.Dismissed.FindSkillsPrompt && cur != true {
+			dismissed.set("findSkillsPrompt", true)
+		} else if !lock.Dismissed.FindSkillsPrompt && cur == true {
+			dismissed.del("findSkillsPrompt")
+		}
+		known["dismissed"] = dismissed
+	}
+	if lock.LastSelectedAgents != nil {
+		v, err := toOrderedJSON(lock.LastSelectedAgents)
+		if err != nil {
+			return nil, err
+		}
+		known["lastSelectedAgents"] = v
+	}
+
+	out := newJSONObject()
+	if origTop != nil {
+		for _, k := range origTop.keys {
+			switch k {
+			case "version", "skills", "dismissed", "lastSelectedAgents":
+				if v, ok := known[k]; ok {
+					out.set(k, v)
+				}
+			default:
+				v, _ := origTop.get(k)
+				out.set(k, v)
+			}
+		}
+	}
+	for _, k := range []string{"version", "skills", "dismissed", "lastSelectedAgents"} {
+		if v, ok := known[k]; ok && !out.has(k) {
+			out.set(k, v)
+		}
+	}
+	return out, nil
+}
+
 // WriteSkillLock writes the global skill lock file, returning any filesystem error (#2606).
+// Like upstream (JSON.stringify(lock, null, 2)), there is no trailing newline.
 func WriteSkillLock(lock SkillLockFile) error {
 	path := GetSkillLockPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -180,11 +329,13 @@ func WriteSkillLock(lock SkillLockFile) error {
 	if lock.Skills == nil {
 		lock.Skills = make(map[string]SkillLockEntry)
 	}
-	data, err := marshalPrettyJSON(lock, false)
+	doc, err := globalLockJSON(lock)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	var buf bytes.Buffer
+	writeJSONStringify(&buf, doc, "")
+	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
 		return fmt.Errorf("write global skill lock %s: %w", path, err)
 	}
 	return nil
@@ -196,7 +347,7 @@ func AddSkillToLock(skillName string, entry SkillLockEntry) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(lockTimestampFormat)
 	existing, ok := lock.Skills[skillName]
 	if ok && existing.InstalledAt != "" {
 		entry.InstalledAt = existing.InstalledAt
@@ -246,19 +397,15 @@ func GetAllLockedSkills() (map[string]SkillLockEntry, error) {
 	return lock.Skills, nil
 }
 
-// GetSkillsBySource groups global locked skills by their source identifier.
+// GetSkillsBySource groups global locked skills by their source identifier, iterating skills in
+// lock-file order like upstream's Object.entries(lock.skills).
 func GetSkillsBySource() (map[string]SkillsBySourceGroup, error) {
 	lock, err := ReadSkillLock()
 	if err != nil {
 		return nil, err
 	}
 	bySource := make(map[string]SkillsBySourceGroup)
-	keys := make([]string, 0, len(lock.Skills))
-	for k := range lock.Skills {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, skillName := range keys {
+	for _, skillName := range lock.orderedSkillNames() {
 		entry := lock.Skills[skillName]
 		if existing, ok := bySource[entry.Source]; ok {
 			existing.Skills = append(existing.Skills, skillName)
@@ -512,7 +659,9 @@ func FrozenLockfileError(changes []string) error {
 	return errors.New(strings.Join(lines, "\n"))
 }
 
-// ComputeSkillFolderHash computes a SHA-256 hash from all regular files in a skill directory.
+// ComputeSkillFolderHash computes a SHA-256 hash from all regular files in a skill directory,
+// matching computeSkillFolderHash in upstream src/local-lock.ts: files are ordered with
+// relativePath.localeCompare (ICU collation, see jsLocaleCompare), not byte order.
 func ComputeSkillFolderHash(skillDir string) (string, error) {
 	var files []struct {
 		relPath string
@@ -550,7 +699,10 @@ func ComputeSkillFolderHash(skillDir string) (string, error) {
 		return "", err
 	}
 
-	sort.Slice(files, func(i, j int) bool {
+	sort.SliceStable(files, func(i, j int) bool {
+		if c := jsLocaleCompare(files[i].relPath, files[j].relPath); c != 0 {
+			return c < 0
+		}
 		return files[i].relPath < files[j].relPath
 	})
 
@@ -645,7 +797,7 @@ func collectSkillsShDir(root, dir string, out *[]SkillTreeFile) error {
 			}
 			*out = append(*out, SkillTreeFile{
 				Path:     slashRel,
-				Contents: string(raw),
+				Contents: decodeUTF8WHATWG(raw),
 			})
 		}
 	}
@@ -844,4 +996,442 @@ func GetGitRepoTreeHash(repoDir, skillPath string) string {
 		return ""
 	}
 	return strings.ToLower(hash)
+}
+
+// --- JavaScript-compatible collation (String.prototype.localeCompare) ---
+
+// icuRootASCIIOrder lists every non-ignorable ASCII character in ICU root collation order
+// (CLDR root, tertiary strength, alternate=non-ignorable), the order Node's default
+// localeCompare uses. Each uppercase letter shares the primary weight of the lowercase letter
+// before it and differs only at the tertiary level (lowercase first). The other C0 controls
+// and DEL are completely ignorable.
+const icuRootASCIIOrder = "\t\n\v\f\r _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789" +
+	"aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ"
+
+var icuASCIIPrimary, icuASCIITertiary [utf8.RuneSelf]uint16
+
+func init() {
+	var p uint16
+	for i := 0; i < len(icuRootASCIIOrder); i++ {
+		c := icuRootASCIIOrder[i]
+		if c >= 'A' && c <= 'Z' {
+			icuASCIIPrimary[c] = p
+			icuASCIITertiary[c] = 1
+			continue
+		}
+		p++
+		icuASCIIPrimary[c] = p
+	}
+}
+
+// collationWeights returns the primary and tertiary weights of r; ok is false when r is
+// completely ignorable. Non-ASCII runes sort after all ASCII letters, by code point.
+func collationWeights(r rune) (primary uint32, tertiary uint16, ok bool) {
+	if r >= 0 && r < utf8.RuneSelf {
+		p := icuASCIIPrimary[r]
+		return uint32(p), icuASCIITertiary[r], p != 0
+	}
+	return 0x100 + uint32(r), 0, true
+}
+
+// nextCollationWeight advances *pos past ignorable runes in s and returns the weight of the
+// next non-ignorable rune at the given level (0 = primary, 1 = tertiary).
+func nextCollationWeight(s string, pos *int, level int) (uint32, bool) {
+	for *pos < len(s) {
+		r, n := utf8.DecodeRuneInString(s[*pos:])
+		*pos += n
+		p, t, ok := collationWeights(r)
+		if !ok {
+			continue
+		}
+		if level == 1 {
+			return uint32(t), true
+		}
+		return p, true
+	}
+	return 0, false
+}
+
+// jsLocaleCompare returns the sign of JavaScript's a.localeCompare(b) under Node's default
+// (en / ICU root) collator. It compares all primary weights first, then tertiary (case)
+// weights. It is exact for ASCII strings, which covers skill file paths in practice; non-ASCII
+// runes use a deterministic code-point fallback instead of full ICU data, keeping skl free of
+// extra module dependencies. Strings that differ only in ignorable controls compare equal.
+func jsLocaleCompare(a, b string) int {
+	for level := 0; level < 2; level++ {
+		i, j := 0, 0
+		for {
+			wa, oka := nextCollationWeight(a, &i, level)
+			wb, okb := nextCollationWeight(b, &j, level)
+			if !oka || !okb {
+				if oka {
+					return 1
+				}
+				if okb {
+					return -1
+				}
+				break
+			}
+			if wa != wb {
+				if wa < wb {
+					return -1
+				}
+				return 1
+			}
+		}
+	}
+	return 0
+}
+
+// decodeUTF8WHATWG decodes b like Node's buffer.toString('utf8'): each maximal subpart of an
+// ill-formed sequence becomes one U+FFFD (WHATWG Encoding Standard UTF-8 decoder). This
+// differs from both string(b) and strings.ToValidUTF8.
+func decodeUTF8WHATWG(b []byte) string {
+	if utf8.Valid(b) {
+		return string(b)
+	}
+	var sb strings.Builder
+	sb.Grow(len(b) + 8)
+	for i := 0; i < len(b); {
+		c := b[i]
+		if c < 0x80 {
+			sb.WriteByte(c)
+			i++
+			continue
+		}
+		need := 0
+		lower, upper := byte(0x80), byte(0xBF)
+		switch {
+		case c >= 0xC2 && c <= 0xDF:
+			need = 1
+		case c >= 0xE0 && c <= 0xEF:
+			need = 2
+			if c == 0xE0 {
+				lower = 0xA0
+			} else if c == 0xED {
+				upper = 0x9F
+			}
+		case c >= 0xF0 && c <= 0xF4:
+			need = 3
+			if c == 0xF0 {
+				lower = 0x90
+			} else if c == 0xF4 {
+				upper = 0x8F
+			}
+		default:
+			sb.WriteString("\uFFFD")
+			i++
+			continue
+		}
+		j := i + 1
+		ok := true
+		for k := 0; k < need; k++ {
+			if j >= len(b) || b[j] < lower || b[j] > upper {
+				ok = false
+				break
+			}
+			lower, upper = 0x80, 0xBF
+			j++
+		}
+		if !ok {
+			// The byte at j (if any) is not consumed; it starts the next sequence.
+			sb.WriteString("\uFFFD")
+			i = j
+			continue
+		}
+		sb.Write(b[i:j])
+		i = j
+	}
+	return sb.String()
+}
+
+// --- Order-preserving JSON compatible with JSON.parse / JSON.stringify ---
+
+// jsonObject is a JSON object that keeps key insertion order. Values are nil, bool,
+// json.Number, string, []interface{} or *jsonObject.
+type jsonObject struct {
+	keys []string
+	vals map[string]interface{}
+}
+
+func newJSONObject() *jsonObject {
+	return &jsonObject{vals: make(map[string]interface{})}
+}
+
+func (o *jsonObject) has(k string) bool {
+	_, ok := o.vals[k]
+	return ok
+}
+
+func (o *jsonObject) get(k string) (interface{}, bool) {
+	v, ok := o.vals[k]
+	return v, ok
+}
+
+// set assigns k, keeping the position of an existing key (as JavaScript property assignment
+// and JSON.parse with duplicate keys do).
+func (o *jsonObject) set(k string, v interface{}) {
+	if _, ok := o.vals[k]; !ok {
+		o.keys = append(o.keys, k)
+	}
+	o.vals[k] = v
+}
+
+func (o *jsonObject) del(k string) {
+	if _, ok := o.vals[k]; !ok {
+		return
+	}
+	delete(o.vals, k)
+	for i, key := range o.keys {
+		if key == k {
+			o.keys = append(o.keys[:i:i], o.keys[i+1:]...)
+			break
+		}
+	}
+}
+
+// clone returns a shallow copy of o.
+func (o *jsonObject) clone() *jsonObject {
+	c := &jsonObject{keys: append([]string(nil), o.keys...), vals: make(map[string]interface{}, len(o.vals))}
+	for k, v := range o.vals {
+		c.vals[k] = v
+	}
+	return c
+}
+
+// parseOrderedJSON parses data into ordered values (see jsonObject).
+func parseOrderedJSON(data []byte) (interface{}, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	v, err := decodeOrderedJSON(dec)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("invalid JSON: unexpected data after top-level value")
+	}
+	return v, nil
+}
+
+func decodeOrderedJSON(dec *json.Decoder) (interface{}, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return tok, nil
+	}
+	switch delim {
+	case '{':
+		obj := newJSONObject()
+		for dec.More() {
+			kt, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, ok := kt.(string)
+			if !ok {
+				return nil, fmt.Errorf("invalid JSON object key %v", kt)
+			}
+			v, err := decodeOrderedJSON(dec)
+			if err != nil {
+				return nil, err
+			}
+			obj.set(key, v)
+		}
+		if _, err := dec.Token(); err != nil {
+			return nil, err
+		}
+		return obj, nil
+	case '[':
+		arr := []interface{}{}
+		for dec.More() {
+			v, err := decodeOrderedJSON(dec)
+			if err != nil {
+				return nil, err
+			}
+			arr = append(arr, v)
+		}
+		if _, err := dec.Token(); err != nil {
+			return nil, err
+		}
+		return arr, nil
+	}
+	return nil, fmt.Errorf("invalid JSON delimiter %v", delim)
+}
+
+// toOrderedJSON converts a Go value to ordered JSON values via encoding/json, so struct
+// fields keep their declaration order and omitempty rules apply.
+func toOrderedJSON(v interface{}) (interface{}, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return parseOrderedJSON(data)
+}
+
+// isJSArrayIndexKey reports whether k is a canonical array index ("0".."4294967294"), which
+// JavaScript objects enumerate before all other string keys, in ascending numeric order.
+func isJSArrayIndexKey(k string) bool {
+	if k == "" || len(k) > 10 || (len(k) > 1 && k[0] == '0') {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		if k[i] < '0' || k[i] > '9' {
+			return false
+		}
+	}
+	n, err := strconv.ParseUint(k, 10, 64)
+	return err == nil && n < 4294967295
+}
+
+// jsOrderKeys returns keys in JavaScript property enumeration order: array-index keys first
+// (ascending), then the remaining keys in insertion order.
+func jsOrderKeys(keys []string) []string {
+	var idx, rest []string
+	for _, k := range keys {
+		if isJSArrayIndexKey(k) {
+			idx = append(idx, k)
+		} else {
+			rest = append(rest, k)
+		}
+	}
+	if len(idx) == 0 {
+		return keys
+	}
+	sort.SliceStable(idx, func(i, j int) bool {
+		a, _ := strconv.ParseUint(idx[i], 10, 64)
+		b, _ := strconv.ParseUint(idx[j], 10, 64)
+		return a < b
+	})
+	return append(idx, rest...)
+}
+
+// writeJSONStringify writes v as JSON.stringify(v, null, 2) would, starting at indent.
+func writeJSONStringify(buf *bytes.Buffer, v interface{}, indent string) {
+	switch t := v.(type) {
+	case nil:
+		buf.WriteString("null")
+	case bool:
+		if t {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
+	case json.Number:
+		buf.WriteString(formatJSNumber(string(t)))
+	case string:
+		writeJSQuotedString(buf, t)
+	case []interface{}:
+		if len(t) == 0 {
+			buf.WriteString("[]")
+			return
+		}
+		inner := indent + "  "
+		buf.WriteString("[\n")
+		for i, item := range t {
+			if i > 0 {
+				buf.WriteString(",\n")
+			}
+			buf.WriteString(inner)
+			writeJSONStringify(buf, item, inner)
+		}
+		buf.WriteString("\n" + indent + "]")
+	case *jsonObject:
+		if len(t.keys) == 0 {
+			buf.WriteString("{}")
+			return
+		}
+		inner := indent + "  "
+		buf.WriteString("{\n")
+		for i, k := range jsOrderKeys(t.keys) {
+			if i > 0 {
+				buf.WriteString(",\n")
+			}
+			buf.WriteString(inner)
+			writeJSQuotedString(buf, k)
+			buf.WriteString(": ")
+			writeJSONStringify(buf, t.vals[k], inner)
+		}
+		buf.WriteString("\n" + indent + "}")
+	default:
+		buf.WriteString("null")
+	}
+}
+
+// writeJSQuotedString quotes s like JSON.stringify: only '"', '\\' and C0 controls are escaped
+// (U+2028, U+2029 and HTML characters are written verbatim).
+func writeJSQuotedString(buf *bytes.Buffer, s string) {
+	const hexDigits = "0123456789abcdef"
+	buf.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '"':
+			buf.WriteString(`\"`)
+		case '\\':
+			buf.WriteString(`\\`)
+		case '\b':
+			buf.WriteString(`\b`)
+		case '\f':
+			buf.WriteString(`\f`)
+		case '\n':
+			buf.WriteString(`\n`)
+		case '\r':
+			buf.WriteString(`\r`)
+		case '\t':
+			buf.WriteString(`\t`)
+		default:
+			if r < 0x20 {
+				buf.WriteString(`\u00`)
+				buf.WriteByte(hexDigits[r>>4])
+				buf.WriteByte(hexDigits[r&0xF])
+			} else {
+				buf.WriteRune(r)
+			}
+		}
+	}
+	buf.WriteByte('"')
+}
+
+// formatJSNumber formats a JSON number literal the way JavaScript's Number::toString does after
+// JSON.parse (e.g. "1.0" -> "1", "1e2" -> "100", "1e21" -> "1e+21"). Out-of-range values become
+// "null", as JSON.stringify writes Infinity.
+func formatJSNumber(lit string) string {
+	f, err := strconv.ParseFloat(lit, 64)
+	if (err != nil && !errors.Is(err, strconv.ErrRange)) || math.IsInf(f, 0) || math.IsNaN(f) {
+		return "null"
+	}
+	if f == 0 {
+		return "0"
+	}
+	sign := ""
+	if f < 0 {
+		sign = "-"
+		f = -f
+	}
+	s := strconv.FormatFloat(f, 'e', -1, 64) // d.ddde±XX
+	ePos := strings.IndexByte(s, 'e')
+	digits := strings.Replace(s[:ePos], ".", "", 1)
+	exp, _ := strconv.Atoi(s[ePos+1:])
+	k, n := len(digits), exp+1
+	switch {
+	case k <= n && n <= 21:
+		return sign + digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		return sign + digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		return sign + "0." + strings.Repeat("0", -n) + digits
+	}
+	e := n - 1
+	expSign := "+"
+	if e < 0 {
+		expSign = "-"
+		e = -e
+	}
+	mant := digits[:1]
+	if k > 1 {
+		mant += "." + digits[1:]
+	}
+	return sign + mant + "e" + expSign + strconv.Itoa(e)
 }

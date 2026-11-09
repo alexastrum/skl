@@ -115,15 +115,50 @@ description: oops
 			wantContent: "---\nname: unclosed\ndescription: oops\n# Just content\n",
 			wantErr:     false,
 		},
+		// Upstream /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/ needs a newline before the
+		// closing ---, so adjacent delimiters are not frontmatter. Expected values come from
+		// running that regex in Node.
 		{
-			name: "Empty frontmatter",
-			input: `---
----
-# Content
-`,
+			name:        "Adjacent delimiters are not frontmatter",
+			input:       "---\n---\n# Content\n",
+			wantData:    map[string]interface{}{},
+			wantContent: "---\n---\n# Content\n",
+		},
+		{
+			name:        "Empty frontmatter",
+			input:       "---\n\n---\n# Content\n",
 			wantData:    map[string]interface{}{},
 			wantContent: "# Content\n",
-			wantErr:     false,
+		},
+		{
+			name:        "Closing line of four dashes closes",
+			input:       "---\nname: a\n----\nbody",
+			wantData:    map[string]interface{}{"name": "a"},
+			wantContent: "-\nbody",
+		},
+		{
+			name:        "Closing line with trailing comment closes",
+			input:       "---\nname: a\n--- # x\nbody",
+			wantData:    map[string]interface{}{"name": "a"},
+			wantContent: " # x\nbody",
+		},
+		{
+			name:        "Closing dashes glued to text close",
+			input:       "---\nname: a\n---x\nbody",
+			wantData:    map[string]interface{}{"name": "a"},
+			wantContent: "x\nbody",
+		},
+		{
+			name:        "Only one CR and one LF consumed after closing",
+			input:       "---\nname: a\n---\r\r\nbody",
+			wantData:    map[string]interface{}{"name": "a"},
+			wantContent: "\r\nbody",
+		},
+		{
+			name:        "Closing at end of input",
+			input:       "---\nname: a\n---",
+			wantData:    map[string]interface{}{"name": "a"},
+			wantContent: "",
 		},
 	}
 

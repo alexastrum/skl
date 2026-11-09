@@ -1,12 +1,16 @@
 package skl
 
 import (
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -350,5 +354,247 @@ func TestSkillsShTreeHashAndGitTreeHash(t *testing.T) {
 		if gotPureGoSHA != wantSHA {
 			t.Errorf("ComputeGitTreeHash() = %q, want git rev-parse SHA %q", gotPureGoSHA, wantSHA)
 		}
+	}
+}
+
+// Expected values in the tests below were produced by Node 24 running the upstream logic
+// (localeCompare + sha256 from src/local-lock.ts, Buffer.toString('utf8'), JSON.stringify).
+
+func TestJSLocaleCompareMatchesNodeOrder(t *testing.T) {
+	want := []string{"_meta.json", "a_b.md", "a-b.md", "a.b.md", "alpha.md", "README.md",
+		"references/api.md", "scripts/run.py", "SKILL.md", "Zeta.md"}
+	got := []string{"Zeta.md", "SKILL.md", "scripts/run.py", "references/api.md", "README.md",
+		"alpha.md", "a.b.md", "a-b.md", "a_b.md", "_meta.json"}
+	sort.SliceStable(got, func(i, j int) bool { return jsLocaleCompare(got[i], got[j]) < 0 })
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("localeCompare order = %q, want %q", got, want)
+	}
+
+	pairs := []struct {
+		a, b string
+		want int
+	}{
+		{"a", "A", -1},      // case is a tertiary difference, lowercase first
+		{"ab", "Aa", 1},     // primary difference beats case
+		{"_", "-", -1},      // punctuation order
+		{"~", "0", -1},      // punctuation < digits
+		{"9", "a", -1},      // digits < letters
+		{"10", "9", -1},     // no numeric collation
+		{"a\x01b", "ab", 0}, // C0 controls are ignorable
+		{"a b", "a\tb", 1},  // whitespace is not ignorable
+		{"scripts/b", "Scripts/a", 1},
+	}
+	for _, p := range pairs {
+		if got := jsLocaleCompare(p.a, p.b); got != p.want {
+			t.Errorf("jsLocaleCompare(%q, %q) = %d, want %d", p.a, p.b, got, p.want)
+		}
+	}
+}
+
+func TestComputeSkillFolderHashUsesLocaleOrder(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  string
+	}{
+		{
+			name:  "lowercase subdirectory sorts before SKILL.md",
+			files: map[string]string{"SKILL.md": "a", "references/x.md": "b"},
+			want:  "e232e2bdb740d26ee0164d3e6dc2a2751955f2b865ccd16eb3e53c71b75b881f",
+		},
+		{
+			name: "punctuation, case and nested paths",
+			files: map[string]string{"_meta.json": "1", "a_b.md": "2", "a-b.md": "3", "a.b.md": "4",
+				"alpha.md": "5", "README.md": "6", "references/api.md": "7", "scripts/run.py": "8",
+				"SKILL.md": "9", "Zeta.md": "10"},
+			want: "f5c02e77b5e056d2bf53de307b65cb37998b325e29ce8b37b13e1afa22e01ac2",
+		},
+		{
+			name: "digits, case-only directory differences and tilde",
+			files: map[string]string{"SKILL.md": "# s\n", "Scripts/a.sh": "x", "scripts/b.sh": "y",
+				"assets/10.txt": "t", "assets/9.txt": "n", "assets/A.txt": "u", "~notes.md": "z"},
+			want: "f2b84886401697e26395c04b2cfe4d6a64a4766991d171c3024946df6231ecc4",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for rel, content := range tt.files {
+				p := filepath.Join(dir, filepath.FromSlash(rel))
+				if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := ComputeSkillFolderHash(dir)
+			if err != nil {
+				t.Fatalf("ComputeSkillFolderHash: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("ComputeSkillFolderHash = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecodeUTF8WHATWG(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"61e28241ffff", "61efbfbd41efbfbdefbfbd"},
+		{"f09080", "efbfbd"},
+		{"eda08041", "efbfbdefbfbdefbfbd41"},
+		{"e08080", "efbfbdefbfbdefbfbd"},
+		{"f4908080", "efbfbdefbfbdefbfbdefbfbd"},
+		{"c0aff09f9880f09f98", "efbfbdefbfbdf09f9880efbfbd"},
+		{"f09f9880", "f09f9880"},
+	}
+	for _, tt := range tests {
+		in, _ := hex.DecodeString(tt.in)
+		if got := hex.EncodeToString([]byte(decodeUTF8WHATWG(in))); got != tt.want {
+			t.Errorf("decodeUTF8WHATWG(%s) = %s, want %s", tt.in, got, tt.want)
+		}
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte{0x61, 0xe2, 0x82, 0x41, 0xff, 0xff}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	files, err := CollectSkillsShFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Contents != "a\uFFFDA\uFFFD\uFFFD" {
+		t.Errorf("CollectSkillsShFiles = %q, want contents %q", files, "a\uFFFDA\uFFFD\uFFFD")
+	}
+}
+
+func TestGlobalLockEntryTimestampsLastWithMilliseconds(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := AddSkillToLock("s", SkillLockEntry{Source: "o/r", SourceType: "github",
+		SourceUrl: "https://github.com/o/r.git", SkillFolderHash: "h", PluginName: "p",
+		InstallMode: "copy"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(GetSkillLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`"installMode": "copy",\n      "installedAt": "\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z",\n      "updatedAt": "\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z"\n    }`)
+	if !re.Match(data) {
+		t.Errorf("timestamps are not last / not toISOString format:\n%s", data)
+	}
+	if bytes.HasSuffix(data, []byte("\n")) {
+		t.Error("global lock must not end with a newline")
+	}
+}
+
+func TestGlobalLockRoundTripMatchesUpstream(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path := GetSkillLockPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const input = `{"version":3,"futureTop":{"n":1.50,"big":1e21,"small":0.0000001,"arr":[]},"skills":{"zeta":{"source":"o/z","sourceType":"github","sourceUrl":"https://github.com/o/z.git","skillFolderHash":"z1","installedAt":"2025-01-01T00:00:00Z","updatedAt":"2025-01-02T00:00:00Z","pluginName":"p","futureField":"keep"},"10":{"source":"o/n","sourceType":"github","sourceUrl":"u","skillFolderHash":"","installedAt":"a","updatedAt":"b"},"alpha":{"source":"o/a","sourceType":"local","sourceUrl":"/x/<a>&\u2028","skillFolderHash":"a1","installedAt":"2025-01-01T00:00:00.000Z","updatedAt":"2025-01-01T00:00:00.000Z"}},"dismissed":{"otherPrompt":true}}`
+	if err := os.WriteFile(path, []byte(input), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	lock, err := ReadSkillLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock.Skills["alpha"] = SkillLockEntry{Source: "o/a", SourceType: "local", SourceUrl: "/x/<a>&\u2028",
+		SkillFolderHash: "a2", InstalledAt: "2025-01-01T00:00:00.000Z", UpdatedAt: "2026-11-09T23:27:10.123Z"}
+	lock.Skills["beta"] = SkillLockEntry{Source: "o/b", SourceType: "github",
+		SourceUrl: "https://github.com/o/b.git", SkillPath: "skills/b/SKILL.md", SkillFolderHash: "b1",
+		InstallMode: "copy", InstalledAt: "2026-11-09T23:27:10.123Z", UpdatedAt: "2026-11-09T23:27:10.123Z"}
+	lock.Dismissed.FindSkillsPrompt = true
+	if err := WriteSkillLock(lock); err != nil {
+		t.Fatal(err)
+	}
+
+	// Node: l = JSON.parse(input); l.skills.alpha = {...}; l.skills.beta = {...};
+	// l.dismissed.findSkillsPrompt = true; JSON.stringify(l, null, 2)
+	want := `{
+  "version": 3,
+  "futureTop": {
+    "n": 1.5,
+    "big": 1e+21,
+    "small": 1e-7,
+    "arr": []
+  },
+  "skills": {
+    "10": {
+      "source": "o/n",
+      "sourceType": "github",
+      "sourceUrl": "u",
+      "skillFolderHash": "",
+      "installedAt": "a",
+      "updatedAt": "b"
+    },
+    "zeta": {
+      "source": "o/z",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/o/z.git",
+      "skillFolderHash": "z1",
+      "installedAt": "2025-01-01T00:00:00Z",
+      "updatedAt": "2025-01-02T00:00:00Z",
+      "pluginName": "p",
+      "futureField": "keep"
+    },
+    "alpha": {
+      "source": "o/a",
+      "sourceType": "local",
+      "sourceUrl": "/x/<a>&` + "\u2028" + `",
+      "skillFolderHash": "a2",
+      "installedAt": "2025-01-01T00:00:00.000Z",
+      "updatedAt": "2026-11-09T23:27:10.123Z"
+    },
+    "beta": {
+      "source": "o/b",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/o/b.git",
+      "skillPath": "skills/b/SKILL.md",
+      "skillFolderHash": "b1",
+      "installMode": "copy",
+      "installedAt": "2026-11-09T23:27:10.123Z",
+      "updatedAt": "2026-11-09T23:27:10.123Z"
+    }
+  },
+  "dismissed": {
+    "otherPrompt": true,
+    "findSkillsPrompt": true
+  }
+}`
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Errorf("global lock mismatch\n got: %s\nwant: %s", got, want)
+	}
+
+	bySrc, err := GetSkillsBySource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bySrc) != 4 || bySrc["o/z"].Entry.PluginName != "p" {
+		t.Errorf("GetSkillsBySource = %+v", bySrc)
+	}
+}
+
+func TestLocalLockDoesNotEscapeHTMLOrLineSeparators(t *testing.T) {
+	cwd := t.TempDir()
+	if err := AddSkillToLocalLock("s", LocalSkillLockEntry{Source: "o/r", SourceType: "github",
+		SourceUrl: "https://x/<a>&b\u2028", ComputedHash: "h"}, cwd); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(GetLocalLockPath(cwd))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "\"sourceUrl\": \"https://x/<a>&b\u2028\"") {
+		t.Errorf("local lock escaped characters JSON.stringify writes verbatim:\n%s", data)
 	}
 }

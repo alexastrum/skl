@@ -3,11 +3,13 @@ package skl
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -58,6 +60,7 @@ func TestParseAddOptions(t *testing.T) {
 }
 
 func TestAddSkill_Local(t *testing.T) {
+	instTestEnv(t)
 	tmpDir := t.TempDir()
 
 	// Create a mock source skill directory
@@ -79,6 +82,7 @@ description: A wonderful custom skill
 	// Add it to our project
 	opts := AddOptions{
 		Copy: true, // We test copy mode
+		Yes:  true,
 	}
 
 	err := AddSkill(srcDir, opts, tmpDir)
@@ -105,6 +109,7 @@ description: A wonderful custom skill
 }
 
 func TestAddSkill_Errors(t *testing.T) {
+	instTestEnv(t)
 	tmpDir := t.TempDir()
 
 	// 1. Empty source path error
@@ -115,7 +120,7 @@ func TestAddSkill_Errors(t *testing.T) {
 	// 2. Missing SKILL.md error
 	srcDir := filepath.Join(tmpDir, "missing-skill-md")
 	_ = os.MkdirAll(srcDir, 0755)
-	if err := AddSkill(srcDir, AddOptions{}, tmpDir); err == nil {
+	if err := AddSkill(srcDir, AddOptions{Yes: true}, tmpDir); err == nil {
 		t.Error("expected error for missing SKILL.md, got nil")
 	}
 
@@ -123,7 +128,7 @@ func TestAddSkill_Errors(t *testing.T) {
 	srcDirNoName := filepath.Join(tmpDir, "no-name-skill")
 	_ = os.MkdirAll(srcDirNoName, 0755)
 	_ = os.WriteFile(filepath.Join(srcDirNoName, "SKILL.md"), []byte("---\ndescription: hello\n---\n"), 0644)
-	if err := AddSkill(srcDirNoName, AddOptions{}, tmpDir); err == nil {
+	if err := AddSkill(srcDirNoName, AddOptions{Yes: true}, tmpDir); err == nil {
 		t.Error("expected error for missing name in frontmatter, got nil")
 	}
 
@@ -131,12 +136,13 @@ func TestAddSkill_Errors(t *testing.T) {
 	srcDirEmptyName := filepath.Join(tmpDir, "empty-name-skill")
 	_ = os.MkdirAll(srcDirEmptyName, 0755)
 	_ = os.WriteFile(filepath.Join(srcDirEmptyName, "SKILL.md"), []byte("---\nname: \"\"\n---\n"), 0644)
-	if err := AddSkill(srcDirEmptyName, AddOptions{}, tmpDir); err == nil {
+	if err := AddSkill(srcDirEmptyName, AddOptions{Yes: true}, tmpDir); err == nil {
 		t.Error("expected error for empty skill name, got nil")
 	}
 }
 
 func TestAddSkill_Remote(t *testing.T) {
+	instTestEnv(t)
 	// Create zip content in memory
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
@@ -208,7 +214,7 @@ func TestAddSkill_DepthAndExclusion(t *testing.T) {
 	// Create subdirectories at different depths
 	// Depth 0
 	_ = os.WriteFile(filepath.Join(srcDir, "SKILL.md"), []byte("---\nname: depth-zero\n---\n"), 0644)
-	
+
 	// Depth 1
 	sub1 := filepath.Join(srcDir, "sub1")
 	_ = os.MkdirAll(sub1, 0755)
@@ -315,6 +321,7 @@ func TestAddSkill_DepthAndExclusion(t *testing.T) {
 }
 
 func TestAddSkill_Filters(t *testing.T) {
+	instTestEnv(t)
 	tmpDir := t.TempDir()
 	srcDir := filepath.Join(tmpDir, "my-filtered-skill")
 	if err := os.MkdirAll(srcDir, 0755); err != nil {
@@ -322,14 +329,14 @@ func TestAddSkill_Filters(t *testing.T) {
 	}
 
 	// Create SKILL.md
-	_ = os.WriteFile(filepath.Join(srcDir, "SKILL.md"), []byte("---\nname: filtered-skill\n---\n"), 0644)
-	
+	_ = os.WriteFile(filepath.Join(srcDir, "SKILL.md"), []byte("---\nname: filtered-skill\ndescription: filtered\n---\n"), 0644)
+
 	// Create normal file
 	_ = os.WriteFile(filepath.Join(srcDir, "README.md"), []byte("# Hello"), 0644)
 
 	// Create files that should be filtered out
 	_ = os.WriteFile(filepath.Join(srcDir, "metadata.json"), []byte("{}"), 0644)
-	
+
 	pycache := filepath.Join(srcDir, "__pycache__")
 	_ = os.MkdirAll(pycache, 0755)
 	_ = os.WriteFile(filepath.Join(pycache, "info.pyc"), []byte("cache"), 0644)
@@ -343,7 +350,7 @@ func TestAddSkill_Filters(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dotGit, "config"), []byte("git config"), 0644)
 
 	// Run AddSkill in copy mode
-	err := AddSkill(srcDir, AddOptions{Copy: true}, tmpDir)
+	err := AddSkill(srcDir, AddOptions{Copy: true, Yes: true}, tmpDir)
 	if err != nil {
 		t.Fatalf("AddSkill failed: %v", err)
 	}
@@ -374,11 +381,12 @@ func TestAddSkill_Filters(t *testing.T) {
 }
 
 func TestAddSkill_Symlink(t *testing.T) {
+	instTestEnv(t)
 	origAgents := Agents
 	defer func() { Agents = origAgents }()
 
 	const MockAgent AgentType = "mock-agent"
-	
+
 	// Create dynamic copy of Agents map and register mock agent
 	Agents = make(map[AgentType]AgentConfig)
 	for k, v := range origAgents {
@@ -395,7 +403,7 @@ func TestAddSkill_Symlink(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	
+
 	// Create parent folder to mock the agent being installed
 	if err := os.MkdirAll(filepath.Join(tmpDir, ".mock-agent"), 0755); err != nil {
 		t.Fatalf("failed to create agent root: %v", err)
@@ -405,7 +413,7 @@ func TestAddSkill_Symlink(t *testing.T) {
 	if err := os.MkdirAll(srcDir, 0755); err != nil {
 		t.Fatalf("failed to create source: %v", err)
 	}
-	_ = os.WriteFile(filepath.Join(srcDir, "SKILL.md"), []byte("---\nname: symlink-skill\n---\n"), 0644)
+	_ = os.WriteFile(filepath.Join(srcDir, "SKILL.md"), []byte("---\nname: symlink-skill\ndescription: symlinked\n---\n"), 0644)
 
 	// Run AddSkill in symlink mode
 	err := AddSkill(srcDir, AddOptions{Agent: []AgentType{MockAgent}}, tmpDir)
@@ -435,7 +443,7 @@ func TestAddSkill_Symlink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read link: %v", err)
 	}
-	
+
 	// Target should point to "../../.agents/skills/symlink-skill" or similar relative path
 	expectedTarget := filepath.Join("..", "..", ".agents", "skills", "symlink-skill")
 	if filepath.Clean(target) != filepath.Clean(expectedTarget) {
@@ -455,52 +463,580 @@ func TestParseAddOptions_YesFlag(t *testing.T) {
 }
 
 func TestMaybeSuggestAgy_NonInteractive(t *testing.T) {
+	instTestEnv(t)
 	// Should execute cleanly without panicking in non-interactive pipeline
 	opts := AddOptions{Yes: true}
 	maybeSuggestAgy(opts)
 }
 
-func TestGitRepoHelpers(t *testing.T) {
-	// Test isGitRepoSource
-	gitTests := []struct {
-		src  string
-		want bool
-	}{
-		{"git@github.com:foo/bar.git", true},
-		{"ssh://git@github.com/foo/bar", true},
-		{"http://github.com/foo/bar", true},
-		{"https://github.com/foo/bar", true},
-		{"foo/bar", true},
-		{"/absolute/path", false},
-		{"./relative/path", false},
-		{"../relative/path", false},
-		{"C:\\windows\\path", false},
-	}
+// ---------------------------------------------------------------------------
+// RunAdd / ParseAddCLIOptions (upstream add.ts parity). Fetching is stubbed through
+// fetchSourceFn so these tests stay hermetic and independent of providers.go.
+// ---------------------------------------------------------------------------
 
-	for _, tt := range gitTests {
-		got := isGitRepoSource(tt.src)
-		if got != tt.want {
-			t.Errorf("isGitRepoSource(%q) = %t, want %t", tt.src, got, tt.want)
+// addFakeLocalFetch builds a FetchedSource for every <root>/<name>/SKILL.md (or root itself).
+func addFakeLocalFetch(t *testing.T, root string) *FetchedSource {
+	t.Helper()
+	f := &FetchedSource{Input: root, SourceType: SourceTypeLocal, Source: root, SourceURL: root, RootDir: root, Via: "local",
+		Parsed: ParsedSource{Type: SourceTypeLocal, URL: root, LocalPath: root}}
+	add := func(dir string) {
+		raw, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
+		if err != nil {
+			return
+		}
+		data, _, err := ParseFrontmatter(string(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		name, _ := data["name"].(string)
+		desc, _ := data["description"].(string)
+		f.Skills = append(f.Skills, FetchedSkill{Skill: Skill{Name: name, Description: desc, Path: dir, RawContent: string(raw)}})
+	}
+	add(root)
+	entries, _ := os.ReadDir(root)
+	for _, e := range entries {
+		if e.IsDir() {
+			add(filepath.Join(root, e.Name()))
 		}
 	}
+	return f
+}
 
-	// Test parseRemoteSource
-	url1, ref1, name1 := parseRemoteSource("foo/bar@v2")
-	if url1 != "https://github.com/foo/bar.git" || ref1 != "" || name1 != "v2" {
-		t.Errorf("parseRemoteSource(foo/bar@v2) = (%q, %q, %q)", url1, ref1, name1)
-	}
+// addStub installs a fetch stub and a "not running in an agent" detector for one test.
+func addStub(t *testing.T, fetch func(req SourceRequest) (*FetchedSource, error)) {
+	t.Helper()
+	origFetch, origDetect := fetchSourceFn, addDetectAgent
+	t.Cleanup(func() { fetchSourceFn, addDetectAgent = origFetch, origDetect })
+	fetchSourceFn = fetch
+	addDetectAgent = func() AgentDetectionResult { return AgentDetectionResult{} }
+}
 
-	url2, ref2, name2 := parseRemoteSource("https://github.com/foo/bar@custom-ref")
-	if url2 != "https://github.com/foo/bar" || ref2 != "" || name2 != "custom-ref" {
-		t.Errorf("parseRemoteSource(https://github.com/foo/bar@custom-ref) = (%q, %q, %q)", url2, ref2, name2)
-	}
-
-	url3, ref3, name3 := parseRemoteSource("foo/bar#v1.0.0@v2")
-	if url3 != "https://github.com/foo/bar.git" || ref3 != "v1.0.0" || name3 != "v2" {
-		t.Errorf("parseRemoteSource(foo/bar#v1.0.0@v2) = (%q, %q, %q)", url3, ref3, name3)
+func addFetchMustNotRun(t *testing.T) func(SourceRequest) (*FetchedSource, error) {
+	return func(SourceRequest) (*FetchedSource, error) {
+		t.Fatal("source must not be fetched")
+		return nil, nil
 	}
 }
 
+func runAddForTest(t *testing.T, cwd string, args ...string) (int, string, string) {
+	t.Helper()
+	var out, errb bytes.Buffer
+	no := false
+	code := RunAddWithIO(args, AddIO{Stdout: &out, Stderr: &errb, Stdin: strings.NewReader(""), Cwd: cwd, Interactive: &no})
+	return code, out.String(), errb.String()
+}
 
+func addTwoSkillSource(t *testing.T) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "repo")
+	instWriteSkill(t, filepath.Join(root, "alpha"), "alpha")
+	instWriteSkill(t, filepath.Join(root, "beta"), "beta")
+	return root
+}
 
+func TestParseAddCLIOptions(t *testing.T) {
+	instTestEnv(t)
+	p := ParseAddCLIOptions([]string{"owner/repo", "-a", "claude-code", "cursor,codex", "-s", "Convex Best Practices", "pr-review", "--subagent", "root", "research", "-g", "--copy", "--full-depth", "--json", "-y", "--metadata", `{"a":1}`})
+	if len(p.Errors) != 0 {
+		t.Fatalf("errors: %v", p.Errors)
+	}
+	if !reflect.DeepEqual(p.Sources, []string{"owner/repo"}) {
+		t.Errorf("sources = %v", p.Sources)
+	}
+	if !reflect.DeepEqual(p.Options.Agent, []AgentType{"claude-code", "cursor", "codex"}) {
+		t.Errorf("agents = %v", p.Options.Agent)
+	}
+	if !reflect.DeepEqual(p.Options.Skill, []string{"Convex Best Practices", "pr-review"}) {
+		t.Errorf("skills = %v", p.Options.Skill)
+	}
+	if !reflect.DeepEqual(p.Options.Subagent, []string{"root", "research"}) {
+		t.Errorf("subagents = %v", p.Options.Subagent)
+	}
+	o := p.Options
+	if !o.Global || !o.Copy || !o.FullDepth || !o.JSON || !o.Yes || o.Metadata != `{"a":1}` || !p.ScopeExplicit || !p.AgentFlagPassed {
+		t.Errorf("flags = %+v", p)
+	}
+	if len(p.ExplicitAgentSet) != 3 {
+		t.Errorf("explicit = %v", p.ExplicitAgentSet)
+	}
 
+	p = ParseAddCLIOptions([]string{"src", "-a", "*", "--all"})
+	if len(p.ExplicitAgentSet) != 0 || !p.Options.All {
+		t.Errorf("wildcard must not count as explicit: %+v", p)
+	}
+
+	p = ParseAddCLIOptions([]string{"--metadata"})
+	if len(p.Errors) != 1 || !strings.Contains(p.Errors[0].Error(), "--metadata requires a JSON value") {
+		t.Errorf("missing metadata: %v", p.Errors)
+	}
+	p = ParseAddCLIOptions([]string{"src", "--metadata", "{nope"})
+	if len(p.Errors) != 1 || !strings.Contains(p.Errors[0].Error(), "--metadata must be valid JSON") {
+		t.Errorf("invalid metadata: %v", p.Errors)
+	}
+
+	// skl compatibility: the source may follow -a/-s.
+	p = ParseAddCLIOptions([]string{"-s", "alpha", "./skills"})
+	if !reflect.DeepEqual(p.Sources, []string{"./skills"}) || !reflect.DeepEqual(p.Options.Skill, []string{"alpha"}) {
+		t.Errorf("reclaimed skill source: %+v", p)
+	}
+	p = ParseAddCLIOptions([]string{"-a", "claude-code", "codex"})
+	if len(p.Sources) != 0 || len(p.Options.Agent) != 2 {
+		t.Errorf("known agents must not be reclaimed: %+v", p)
+	}
+}
+
+func TestRunAdd_InvalidAgentFailsBeforeFetch(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	addStub(t, addFetchMustNotRun(t))
+
+	code, _, stderr := runAddForTest(t, cwd, "owner/repo", "-a", "claude-code", "not-an-agent", "-y")
+	if code != 1 || !strings.Contains(stderr, "Invalid agents: not-an-agent") || !strings.Contains(stderr, "Valid agents:") {
+		t.Fatalf("code=%d stderr=%q", code, stderr)
+	}
+
+	code, stdout, _ := runAddForTest(t, cwd, "owner/repo", "-a", "nope", "-y", "--json")
+	var results []map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &results); err != nil {
+		t.Fatalf("stdout must be one JSON array: %v (%q)", err, stdout)
+	}
+	if code != 1 || len(results) != 1 || results[0]["status"] != "failed" || !strings.Contains(results[0]["error"].(string), "Invalid agents: nope") {
+		t.Errorf("code=%d results=%v", code, results)
+	}
+}
+
+func TestRunAdd_JSONGuards(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	addStub(t, addFetchMustNotRun(t))
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"src", "--json"}, "The --json flag requires --yes (or --all) to run non-interactively."},
+		{[]string{"src", "--json", "-y", "-l"}, "The --json flag cannot be combined with --list."},
+		{[]string{"--json", "-y"}, "Missing required argument: source"},
+	} {
+		code, stdout, _ := runAddForTest(t, cwd, tc.args...)
+		var results []AddJSONResult
+		if err := json.Unmarshal([]byte(stdout), &results); err != nil {
+			t.Fatalf("%v: invalid JSON %q", tc.args, stdout)
+		}
+		if code != 1 || len(results) != 1 || results[0].Error != tc.want {
+			t.Errorf("%v: code=%d results=%+v", tc.args, code, results)
+		}
+	}
+}
+
+func TestRunAdd_ProjectSingleAgentCopiesAndLocks(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	src := addTwoSkillSource(t)
+	addStub(t, func(req SourceRequest) (*FetchedSource, error) { return addFakeLocalFetch(t, src), nil })
+
+	code, stdout, stderr := runAddForTest(t, cwd, src, "-a", "claude-code", "-s", "alpha", "-y")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	dir := filepath.Join(cwd, ".claude", "skills", "alpha")
+	if info, err := os.Lstat(dir); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("expected a real copy at %s (err=%v)", dir, err)
+	}
+	if instExists(filepath.Join(cwd, ".claude", "skills", "beta")) {
+		t.Error("beta was not selected")
+	}
+	if !strings.Contains(stdout, "Installed 1 skill") || !strings.Contains(stdout, "(copied)") {
+		t.Errorf("stdout = %s", stdout)
+	}
+	lock, err := ReadLocalLock(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ok := lock.Skills["alpha"]
+	if !ok || e.SourceType != SourceTypeLocal || e.ComputedHash == "" || e.InstallMode != "" || e.SkillPath != "" {
+		t.Errorf("lock entry = %+v (ok=%v)", e, ok)
+	}
+}
+
+// #2607: a user-chosen copy over a symlink default is recorded in the lock.
+func TestRunAdd_RecordsChosenCopyMode(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	src := addTwoSkillSource(t)
+	addStub(t, func(req SourceRequest) (*FetchedSource, error) { return addFakeLocalFetch(t, src), nil })
+
+	code, _, stderr := runAddForTest(t, cwd, src, "-a", "claude-code", "codex", "--copy", "-y", "-s", "alpha")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	lock, _ := ReadLocalLock(cwd)
+	if lock.Skills["alpha"].InstallMode != "copy" {
+		t.Errorf("installMode = %q", lock.Skills["alpha"].InstallMode)
+	}
+	for _, d := range []string{filepath.Join(cwd, ".claude", "skills", "alpha"), filepath.Join(cwd, ".agents", "skills", "alpha")} {
+		if info, err := os.Lstat(d); err != nil || info.Mode()&os.ModeSymlink != 0 {
+			t.Errorf("expected copy at %s (err=%v)", d, err)
+		}
+	}
+}
+
+// #2271: symlink installs list universal and symlinked agents separately.
+func TestRunAdd_SymlinkSummary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	_, cwd := instTestEnv(t)
+	src := addTwoSkillSource(t)
+	addStub(t, func(req SourceRequest) (*FetchedSource, error) { return addFakeLocalFetch(t, src), nil })
+
+	code, stdout, stderr := runAddForTest(t, cwd, src, "-a", "codex", "claude-code", "-y", "-s", "alpha")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	for _, want := range []string{"universal: Codex", "symlink → Claude Code", "symlinked: Claude Code", "✓ ./.agents/skills/alpha"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+	lock, _ := ReadLocalLock(cwd)
+	if lock.Skills["alpha"].InstallMode != "" {
+		t.Errorf("default symlink mode must not be recorded: %+v", lock.Skills["alpha"])
+	}
+}
+
+func addDownloadFetch(t *testing.T, rawURL string) func(SourceRequest) (*FetchedSource, error) {
+	root := filepath.Join(t.TempDir(), "dl")
+	instWriteSkill(t, filepath.Join(root, "pkg", "dl-skill"), "dl-skill")
+	return func(SourceRequest) (*FetchedSource, error) {
+		f := &FetchedSource{Input: rawURL, SourceType: SourceTypeDownload, Source: rawURL, SourceURL: rawURL, RootDir: root, Via: "download",
+			Parsed: ParsedSource{Type: SourceTypeDownload, URL: rawURL}}
+		f.Skills = []FetchedSkill{{Skill: Skill{Name: "dl-skill", Description: "d", Path: filepath.Join(root, "pkg", "dl-skill")}, SkillPath: "pkg/dl-skill/SKILL.md"}}
+		return f, nil
+	}
+}
+
+// #2682: direct downloads are locked by URL with the SKILL.md path inside the download.
+func TestRunAdd_DirectDownloadLock(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	addStub(t, addDownloadFetch(t, "https://example.com/skills.zip"))
+	code, _, stderr := runAddForTest(t, cwd, "https://example.com/skills.zip", "-a", "codex", "-y")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	lock, _ := ReadLocalLock(cwd)
+	e := lock.Skills["dl-skill"]
+	if e.SourceType != "download" || e.Source != "https://example.com/skills.zip" || e.SourceUrl != "https://example.com/skills.zip" || e.SkillPath != "pkg/dl-skill/SKILL.md" || e.ComputedHash == "" {
+		t.Errorf("lock entry = %+v", e)
+	}
+}
+
+func TestRunAdd_SignedDownloadIsNotLocked(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	signed := "https://bucket.example.com/skills.zip?x-amz-signature=s3cr3tsig"
+	addStub(t, addDownloadFetch(t, signed))
+	code, _, stderr := runAddForTest(t, cwd, signed, "-a", "codex", "-y")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	lock, _ := ReadLocalLock(cwd)
+	if _, ok := lock.Skills["dl-skill"]; ok {
+		t.Error("signed URL must not be recorded")
+	}
+	if !strings.Contains(stderr, "Not recording dl-skill in the lock file: https://bucket.example.com/skills.zip has a query string or credentials") {
+		t.Errorf("stderr = %q", stderr)
+	}
+	if strings.Contains(stderr, "s3cr3tsig") {
+		t.Errorf("warning leaked the signature: %q", stderr)
+	}
+	if !instExists(filepath.Join(cwd, ".agents", "skills", "dl-skill", "SKILL.md")) {
+		t.Error("skill must still be installed")
+	}
+}
+
+// #2606: a lock write failure is reported and exits 1 after installing.
+func TestRunAdd_LockWriteFailureExitsOne(t *testing.T) {
+	home, cwd := instTestEnv(t)
+	blocker := filepath.Join(home, "state-is-a-file")
+	_ = os.WriteFile(blocker, []byte("x"), 0o644)
+	t.Setenv("XDG_STATE_HOME", blocker)
+	src := addTwoSkillSource(t)
+	addStub(t, func(req SourceRequest) (*FetchedSource, error) { return addFakeLocalFetch(t, src), nil })
+
+	code, _, stderr := runAddForTest(t, cwd, src, "-g", "-a", "claude-code", "-y", "-s", "alpha")
+	if code != 1 || !strings.Contains(stderr, "Installed alpha but could not record it in") {
+		t.Fatalf("code=%d stderr=%q", code, stderr)
+	}
+	if !instExists(filepath.Join(home, ".claude", "skills", "alpha", "SKILL.md")) {
+		t.Error("skill should still be installed")
+	}
+}
+
+func TestRunAdd_GlobalLockEntry(t *testing.T) {
+	home, cwd := instTestEnv(t)
+	src := addTwoSkillSource(t)
+	addStub(t, func(req SourceRequest) (*FetchedSource, error) { return addFakeLocalFetch(t, src), nil })
+	code, _, stderr := runAddForTest(t, cwd, src, "-g", "-a", "claude-code", "-y", "-s", "beta")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	entry, err := GetSkillFromLock("beta")
+	if err != nil || entry == nil || entry.SourceType != SourceTypeLocal || entry.SkillFolderHash == "" {
+		t.Fatalf("global lock entry = %+v err=%v", entry, err)
+	}
+	if !instExists(filepath.Join(home, ".claude", "skills", "beta")) {
+		t.Error("expected global claude install")
+	}
+	if _, err := os.Stat(filepath.Join(cwd, "skills-lock.json")); err == nil {
+		t.Error("global installs must not write the project lock")
+	}
+}
+
+func TestRunAdd_JSONOutputContract(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	src := addTwoSkillSource(t)
+	addStub(t, func(req SourceRequest) (*FetchedSource, error) { return addFakeLocalFetch(t, src), nil })
+
+	code, stdout, _ := runAddForTest(t, cwd, src, "-a", "codex", "-s", "alpha", "missing", "-y", "--json")
+	if code != 1 {
+		t.Errorf("a skipped request must exit 1, got %d", code)
+	}
+	var results []map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &results); err != nil {
+		t.Fatalf("stdout is not a JSON array: %v\n%s", err, stdout)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %v", results)
+	}
+	if results[0]["name"] != "missing" || results[0]["status"] != "skipped" || results[0]["reason"] != "No matching skill found in source" {
+		t.Errorf("skipped entry = %v", results[0])
+	}
+	inst := results[1]
+	if inst["name"] != "alpha" || inst["status"] != "installed" || inst["scope"] != "project" || inst["mode"] != "copy" {
+		t.Errorf("installed entry = %v", inst)
+	}
+	for _, k := range []string{"ref", "security"} {
+		if v, ok := inst[k]; !ok || v != nil {
+			t.Errorf("%s must be present and null: %v", k, inst)
+		}
+	}
+	if h, _ := inst["hash"].(string); len(h) != 64 {
+		t.Errorf("hash = %v", inst["hash"])
+	}
+	if agents, _ := inst["agents"].([]interface{}); len(agents) != 1 || agents[0] != "Codex" {
+		t.Errorf("agents = %v", inst["agents"])
+	}
+}
+
+func TestRunAdd_ExplicitGlobalUnsupportedAgentFails(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	src := addTwoSkillSource(t)
+	addStub(t, func(req SourceRequest) (*FetchedSource, error) { return addFakeLocalFetch(t, src), nil })
+	code, _, stderr := runAddForTest(t, cwd, src, "-g", "-a", "promptscript", "-y", "-s", "alpha")
+	if code != 1 || !strings.Contains(stderr, "PromptScript does not support global skill installation") {
+		t.Errorf("code=%d stderr=%q", code, stderr)
+	}
+}
+
+// #2547: agents picked automatically that have no global dir are skipped with one notice.
+func TestRunAdd_GlobalAllAgentsSkipsWithoutGlobalDir(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	src := addTwoSkillSource(t)
+	addStub(t, func(req SourceRequest) (*FetchedSource, error) { return addFakeLocalFetch(t, src), nil })
+	code, stdout, stderr := runAddForTest(t, cwd, src, "-g", "-y", "-s", "alpha")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "PromptScript") || !strings.Contains(stdout, ": no global skills directory") {
+		t.Errorf("missing skip notice:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, agyTip) {
+		t.Errorf("expected agy onboarding tip when no agents are detected")
+	}
+}
+
+func TestRunAdd_PromptWithoutTTYFails(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	src := addTwoSkillSource(t)
+	addStub(t, func(req SourceRequest) (*FetchedSource, error) { return addFakeLocalFetch(t, src), nil })
+	code, _, stderr := runAddForTest(t, cwd, src, "-a", "codex")
+	if code != 1 || !strings.Contains(stderr, "SKILLS_PROMPT_REQUIRES_TTY") {
+		t.Errorf("code=%d stderr=%q", code, stderr)
+	}
+	if instExists(filepath.Join(cwd, ".agents", "skills", "alpha")) {
+		t.Error("nothing may be installed when a prompt cannot run")
+	}
+}
+
+func TestRunAdd_InteractivePrompts(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	src := addTwoSkillSource(t)
+	addStub(t, func(req SourceRequest) (*FetchedSource, error) { return addFakeLocalFetch(t, src), nil })
+	var out, errb bytes.Buffer
+	yes := true
+	// skills: pick 2 (beta); scope: project (default); confirm: yes.
+	code := RunAddWithIO([]string{src, "-a", "codex"}, AddIO{Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("2\n\ny\n"), Cwd: cwd, Interactive: &yes})
+	if code != 0 {
+		t.Fatalf("code=%d out=%s err=%s", code, out.String(), errb.String())
+	}
+	if !instExists(filepath.Join(cwd, ".agents", "skills", "beta")) || instExists(filepath.Join(cwd, ".agents", "skills", "alpha")) {
+		t.Errorf("expected only beta installed; out=%s", out.String())
+	}
+}
+
+// #2651: a skills.sh pack entry installs from its upstream repo only when the tree hash matches.
+func TestRunAdd_PackPointerVerification(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	packRoot := filepath.Join(t.TempDir(), "pack")
+	instWriteSkill(t, filepath.Join(packRoot, "same"), "same")
+	instWriteSkill(t, filepath.Join(packRoot, "drift"), "drift")
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	instWriteSkill(t, filepath.Join(repoRoot, "skills", "same"), "same")
+	instWriteSkill(t, filepath.Join(repoRoot, "skills", "drift"), "drift")
+	_ = os.WriteFile(filepath.Join(repoRoot, "skills", "drift", "extra.md"), []byte("changed upstream"), 0o644)
+
+	pin := func(dir string) string {
+		h, err := ComputeSkillTreeHash(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	samePin := pin(filepath.Join(packRoot, "same"))
+	driftPin := pin(filepath.Join(packRoot, "drift"))
+
+	addStub(t, func(req SourceRequest) (*FetchedSource, error) {
+		if req.Source == "acme/skills" {
+			f := &FetchedSource{Input: req.Source, SourceType: SourceTypeGitHub, Source: "acme/skills", SourceURL: "https://github.com/acme/skills.git", RootDir: repoRoot, Via: "clone"}
+			for _, n := range []string{"same", "drift"} {
+				f.Skills = append(f.Skills, FetchedSkill{Skill: Skill{Name: n, Description: "d", Path: filepath.Join(repoRoot, "skills", n)}, SkillPath: "skills/" + n + "/SKILL.md"})
+			}
+			return f, nil
+		}
+		f := &FetchedSource{Input: req.Source, SourceType: SourceTypeWellKnown, Source: "skills.sh", SourceURL: "https://skills.sh/p/demo", RootDir: packRoot, Via: "well-known"}
+		f.Skills = []FetchedSkill{
+			{Skill: Skill{Name: "same", Description: "d", Path: filepath.Join(packRoot, "same")}, WellKnownDigest: "sha256:aa", PackPointer: &PackSkillPointer{Repo: "acme/skills", Skill: "same", TreeHash: samePin}},
+			{Skill: Skill{Name: "drift", Description: "d", Path: filepath.Join(packRoot, "drift")}, WellKnownDigest: "sha256:bb", PackPointer: &PackSkillPointer{Repo: "acme/skills", Skill: "drift", TreeHash: driftPin}},
+		}
+		return f, nil
+	})
+	parsed, err := ParseSource("https://skills.sh/p/demo")
+	if err != nil || parsed.Type != SourceTypeWellKnown {
+		t.Skipf("ParseSource does not classify skills.sh packs as well-known yet: %+v %v", parsed, err)
+	}
+	code, stdout, stderr := runAddForTest(t, cwd, "https://skills.sh/p/demo", "-a", "codex", "-y")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "drift changed in acme/skills since this pack pinned it; using the pack's copy") {
+		t.Errorf("stdout = %s", stdout)
+	}
+	lock, _ := ReadLocalLock(cwd)
+	if e := lock.Skills["same"]; e.Source != "acme/skills" || e.SourceType != SourceTypeGitHub || e.SkillPath != "skills/same/SKILL.md" {
+		t.Errorf("same should be locked to the upstream repo: %+v", e)
+	}
+	if e := lock.Skills["drift"]; e.SourceType != SourceTypeWellKnown || e.WellKnownDigest != "sha256:bb" {
+		t.Errorf("drift should keep the pack's copy: %+v", e)
+	}
+	if instExists(filepath.Join(cwd, ".agents", "skills", "drift", "extra.md")) {
+		t.Error("drifted upstream content must not be installed")
+	}
+}
+
+// End-to-end through the real FetchSource for a local source (no stubbed fetch).
+func TestRunAdd_RealLocalFetch(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	origDetect := addDetectAgent
+	t.Cleanup(func() { addDetectAgent = origDetect })
+	addDetectAgent = func() AgentDetectionResult { return AgentDetectionResult{} }
+
+	src := addTwoSkillSource(t)
+	code, stdout, stderr := runAddForTest(t, cwd, src, "-a", "codex", "-s", "beta", "-y")
+	if code != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if !instExists(filepath.Join(cwd, ".agents", "skills", "beta", "SKILL.md")) || instExists(filepath.Join(cwd, ".agents", "skills", "alpha")) {
+		t.Errorf("expected only beta installed")
+	}
+	lock, err := ReadLocalLock(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := lock.Skills["beta"]; e.SourceType != SourceTypeLocal || e.ComputedHash == "" {
+		t.Errorf("lock entry = %+v", e)
+	}
+
+	var out, errb bytes.Buffer
+	if code := RunUseWithIO([]string{src + "/beta"}, UseIO{Stdout: &out, Stderr: &errb, Cwd: cwd}); code != 0 {
+		t.Fatalf("use code=%d stderr=%s", code, errb.String())
+	}
+	if !strings.HasPrefix(out.String(), "You are being given a Skill") || !strings.Contains(out.String(), "name: beta") {
+		t.Errorf("use stdout = %q", out.String())
+	}
+}
+
+func TestInstallFromSource(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	_, cwd := instTestEnv(t)
+	src := addTwoSkillSource(t)
+	f := addFakeLocalFetch(t, src)
+
+	res := InstallFromSource(f, InstallFromSourceOptions{Skills: []string{"alpha"}, Agents: []AgentType{"windsurf"}, Via: "my-pkg", Cwd: cwd})
+	if res.Error != "" || len(res.Installed) != 1 || res.Installed[0] != "alpha" || len(res.Failed) != 0 {
+		t.Fatalf("result = %+v", res)
+	}
+	// Restores create the agent root even though .windsurf did not exist.
+	if info, err := os.Lstat(filepath.Join(cwd, ".windsurf", "skills", "alpha")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("expected windsurf symlink (err=%v)", err)
+	}
+	lock, _ := ReadLocalLock(cwd)
+	e := lock.Skills["alpha"]
+	if e.Via != "my-pkg" || e.InstallMode != "" || e.ComputedHash == "" {
+		t.Errorf("lock entry = %+v", e)
+	}
+
+	// Frozen lock: matching content installs without writing the lock.
+	frozen := lock
+	_ = os.Remove(GetLocalLockPath(cwd))
+	res = InstallFromSource(f, InstallFromSourceOptions{Skills: []string{"alpha"}, Agents: []AgentType{"codex"}, FrozenLock: &frozen, Cwd: cwd})
+	if res.Error != "" || len(res.Installed) != 1 {
+		t.Fatalf("frozen match: %+v", res)
+	}
+	if _, err := os.Stat(GetLocalLockPath(cwd)); err == nil {
+		t.Error("frozen installs must not write skills-lock.json")
+	}
+
+	// Frozen lock: changed content is refused before touching disk.
+	_ = os.WriteFile(filepath.Join(src, "beta", "extra.md"), []byte("new"), 0o644)
+	frozen.Skills["beta"] = LocalSkillLockEntry{Source: src, SourceType: SourceTypeLocal, ComputedHash: "0000"}
+	_ = os.RemoveAll(filepath.Join(cwd, ".agents", "skills", "beta"))
+	res = InstallFromSource(f, InstallFromSourceOptions{Skills: []string{"beta"}, Agents: []AgentType{"codex"}, FrozenLock: &frozen, Cwd: cwd})
+	if res.Error == "" || len(res.Installed) != 0 {
+		t.Fatalf("frozen mismatch should fail: %+v", res)
+	}
+	if instExists(filepath.Join(cwd, ".agents", "skills", "beta")) {
+		t.Error("nothing may be written when the frozen lock does not match")
+	}
+
+	if res := InstallFromSource(f, InstallFromSourceOptions{Skills: []string{"nope"}, Agents: []AgentType{"codex"}, Cwd: cwd}); res.Error != "No matching skills found" {
+		t.Errorf("no match: %+v", res)
+	}
+}
+
+// Notion packs: per-skill download URLs are locked, and -s selected packs (not skills).
+func TestRunAdd_NotionPackLocksPerSkillURL(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	root := filepath.Join(t.TempDir(), "packs")
+	instWriteSkill(t, filepath.Join(root, "p1", "n-skill"), "n-skill")
+	addStub(t, func(req SourceRequest) (*FetchedSource, error) {
+		f := &FetchedSource{Input: "notion", SourceType: SourceTypeDownload, Source: "notion", SourceURL: "notion://packs", RootDir: root, Via: "download"}
+		f.Skills = []FetchedSkill{{Skill: Skill{Name: "n-skill", Description: "d", Path: filepath.Join(root, "p1", "n-skill"), PluginName: "Pack One"},
+			SkillPath: "n-skill/SKILL.md", SourceURL: "notion://packs/abc"}}
+		return f, nil
+	})
+	code, _, stderr := runAddForTest(t, cwd, "notion", "-s", "Pack One", "-a", "codex", "-y")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	lock, _ := ReadLocalLock(cwd)
+	if e := lock.Skills["n-skill"]; e.Source != "notion" || e.SourceUrl != "notion://packs/abc" || e.SourceType != "download" || e.SkillPath != "n-skill/SKILL.md" {
+		t.Errorf("lock entry = %+v", e)
+	}
+}

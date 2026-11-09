@@ -69,6 +69,9 @@ func StripTerminalEscapes(str string) string {
 		if r >= 0x80 && r <= 0x9f {
 			continue
 		}
+		// Intentional divergence: upstream CONTROL_RE (\x0d-\x1a, \x1c-\x1f) leaves a lone ESC (0x1b)
+		// in place; skl also strips it, since a stray ESC can still start a sequence in the
+		// terminal it is printed to. Kept as the safer behavior.
 		if (r >= 0x00 && r <= 0x08) || r == 0x0b || r == 0x0c || (r >= 0x0d && r <= 0x1f) || r == 0x7f {
 			continue
 		}
@@ -449,6 +452,9 @@ func BuildAgents(env AgentEnv) map[AgentType]AgentConfig {
 			GlobalReadsCanonical:  false,
 			DetectInstalled: func(h, c, w string) bool {
 				rh := resolveH(h)
+				// Intentional divergence: upstream checks only ~/.gemini/antigravity. skl's
+				// AGENTS.md maps Antigravity to both ~/.gemini/config and ~/.gemini/antigravity,
+				// so either directory marks Antigravity as installed.
 				return exists(filepath.Join(rh, ".gemini", "antigravity")) ||
 					exists(filepath.Join(rh, ".gemini", "config"))
 			},

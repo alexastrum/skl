@@ -13,6 +13,11 @@ import (
 const utf8BOM = "\uFEFF"
 
 // ParseFrontmatter parses YAML frontmatter delimited by `---` from a raw markdown string.
+// It matches upstream's /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/ exactly: after an
+// opening `---` line, the frontmatter ends at the first newline followed by `---`, even when the
+// line continues (`----`, `--- # x`); at most one \r and one \n after that `---` are consumed.
+// The closing `---` must follow a newline, so `---\n---\n` is not frontmatter (content returned
+// raw), while `---\n\n---\n` is empty frontmatter.
 // Leading UTF-8 BOM (\uFEFF) is stripped when matching frontmatter (#97640fb).
 // JavaScript frontmatter (e.g. `---js`) is intentionally not supported to prevent RCE.
 // It returns the parsed metadata map, the remaining markdown content, and any YAML parse error.
@@ -31,45 +36,19 @@ func ParseFrontmatter(raw string) (map[string]interface{}, string, error) {
 		return data, raw, nil
 	}
 
-	// Scan line-by-line for the closing "---" delimiter while preserving exact content bytes after it.
-	var frontmatterText string
-	var remainingContent string
-	foundClose := false
-
-	pos := 0
-	for pos <= len(afterOpen) {
-		lineEnd := strings.IndexByte(afterOpen[pos:], '\n')
-		var line string
-		var nextPos int
-		if lineEnd == -1 {
-			line = afterOpen[pos:]
-			nextPos = len(afterOpen) + 1
-		} else {
-			line = afterOpen[pos : pos+lineEnd]
-			nextPos = pos + lineEnd + 1
-		}
-
-		cleanLine := strings.TrimSuffix(line, "\r")
-		if cleanLine == "---" {
-			frontmatterText = afterOpen[:pos]
-			if nextPos <= len(afterOpen) {
-				remainingContent = afterOpen[nextPos:]
-			} else {
-				remainingContent = ""
-			}
-			foundClose = true
-			break
-		}
-
-		if lineEnd == -1 {
-			break
-		}
-		pos = nextPos
-	}
-
-	if !foundClose {
+	// The lazy group ends at the first "\n---" (or "\r\n---", which starts one byte earlier).
+	closeIdx := strings.Index(afterOpen, "\n---")
+	if closeIdx < 0 {
 		return data, raw, nil
 	}
+	fmEnd := closeIdx
+	if fmEnd > 0 && afterOpen[fmEnd-1] == '\r' {
+		fmEnd--
+	}
+	frontmatterText := afterOpen[:fmEnd]
+	remainingContent := afterOpen[closeIdx+len("\n---"):]
+	remainingContent = strings.TrimPrefix(remainingContent, "\r")
+	remainingContent = strings.TrimPrefix(remainingContent, "\n")
 
 	normalizedFM := strings.ReplaceAll(frontmatterText, "\r\n", "\n")
 	if strings.TrimSpace(normalizedFM) == "" {

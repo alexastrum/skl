@@ -185,12 +185,29 @@ func createAgentMarker(t *testing.T, agent AgentType, home, configHome, cwd stri
 	}
 }
 
+// isolateTestHome points HOME, USERPROFILE, XDG_CONFIG_HOME and XDG_STATE_HOME at temp dirs,
+// clears agent home overrides, and rebuilds Agents from that environment, so a test never reads
+// agent directories under, or writes the global .skill-lock.json into, the real home or state
+// dir. Callers that replace Agents must save and restore it themselves.
+func isolateTestHome(t *testing.T, home, configHome string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	for _, v := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "VIBE_HOME", "HERMES_HOME", "AUTOHAND_HOME", "GROK_HOME", "SARVAM_HOME", "REASONIX_HOME"} {
+		t.Setenv(v, "")
+	}
+	RefreshAgents()
+}
+
 // 1. no agents installed: verify that it installs to antigravity and outputs the agy-cli onboarding tip.
 func TestIntegration_NoAgents(t *testing.T) {
 	origAgents := Agents
 	defer func() { Agents = origAgents }()
 
 	tmpDir := t.TempDir()
+	isolateTestHome(t, tmpDir, tmpDir)
 
 	Agents = make(map[AgentType]AgentConfig)
 	Agents["antigravity"] = AgentConfig{
@@ -211,10 +228,6 @@ func TestIntegration_NoAgents(t *testing.T) {
 			return false
 		},
 	}
-
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
-	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	srcDir := filepath.Join(tmpDir, "my-source-skill")
 	writeDummySkill(t, srcDir, "no-agent-skill")
@@ -272,18 +285,7 @@ func TestIntegration_SupportForAllAgentsButOne(t *testing.T) {
 	_ = os.MkdirAll(configHome, 0755)
 	_ = os.MkdirAll(cwd, 0755)
 
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_CONFIG_HOME", configHome)
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
-	t.Setenv("CODEX_HOME", "")
-	t.Setenv("VIBE_HOME", "")
-	t.Setenv("HERMES_HOME", "")
-	t.Setenv("AUTOHAND_HOME", "")
-	t.Setenv("GROK_HOME", "")
-	t.Setenv("SARVAM_HOME", "")
-	t.Setenv("REASONIX_HOME", "")
-	RefreshAgents()
+	isolateTestHome(t, home, configHome)
 
 	skippedAgent := AgentType("aider-desk")
 
@@ -345,14 +347,13 @@ func TestIntegration_ExactlyOneAgentInstalled(t *testing.T) {
 		_ = os.MkdirAll(configHome, 0755)
 		_ = os.MkdirAll(cwd, 0755)
 
-		t.Setenv("HOME", home)
-		t.Setenv("USERPROFILE", home)
-		t.Setenv("XDG_CONFIG_HOME", configHome)
+		isolateTestHome(t, home, configHome)
+		fresh := Agents
 
 		Agents = make(map[AgentType]AgentConfig)
-		Agents["antigravity"] = origAgents["antigravity"]
-		Agents["universal"] = origAgents["universal"]
-		Agents["roo"] = origAgents["roo"]
+		Agents["antigravity"] = fresh["antigravity"]
+		Agents["universal"] = fresh["universal"]
+		Agents["roo"] = fresh["roo"]
 
 		createAgentMarker(t, "roo", home, configHome, cwd)
 		_ = os.MkdirAll(filepath.Join(cwd, ".roo"), 0755)
@@ -398,9 +399,7 @@ func TestIntegration_ExactlyOneAgentInstalled(t *testing.T) {
 		_ = os.MkdirAll(configHome, 0755)
 		_ = os.MkdirAll(cwd, 0755)
 
-		t.Setenv("HOME", home)
-		t.Setenv("USERPROFILE", home)
-		t.Setenv("XDG_CONFIG_HOME", configHome)
+		isolateTestHome(t, home, configHome)
 
 		_ = os.MkdirAll(filepath.Join(home, ".gemini", "antigravity"), 0755)
 
@@ -440,14 +439,14 @@ func TestIntegration_SupportForDynamicEnvAgents(t *testing.T) {
 	_ = os.MkdirAll(customClaude, 0755)
 	_ = os.MkdirAll(filepath.Join(cwd, ".claude"), 0755)
 
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_CONFIG_HOME", configHome)
+	isolateTestHome(t, home, configHome)
 	t.Setenv("CLAUDE_CONFIG_DIR", customClaude)
+	RefreshAgents()
+	fresh := Agents
 
 	Agents = make(map[AgentType]AgentConfig)
-	Agents["claude-code"] = origAgents["claude-code"]
-	Agents["antigravity"] = origAgents["antigravity"]
+	Agents["claude-code"] = fresh["claude-code"]
+	Agents["antigravity"] = fresh["antigravity"]
 
 	detected := detectInstalledAgents(home, configHome, cwd)
 	if len(detected) != 1 || detected[0] != "claude-code" {

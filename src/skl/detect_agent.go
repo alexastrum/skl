@@ -89,6 +89,8 @@ func determineRawAgent(getenv func(string) string, pathExists func(string) bool)
 	if getenv("ANTIGRAVITY_AGENT") != "" {
 		return AgentDetectionResult{IsAgent: true, Agent: &DetectedAgentDetails{Name: "antigravity"}}
 	}
+	// Intentional divergence: ANTIGRAVITY_CLI_ALIAS is not in the pinned @vercel/detect-agent@1.2.3.
+	// skl adds it so the Antigravity CLI is recognized as antigravity-cli rather than antigravity.
 	if strings.TrimSpace(getenv("ANTIGRAVITY_CLI_ALIAS")) != "" {
 		return AgentDetectionResult{IsAgent: true, Agent: &DetectedAgentDetails{Name: "antigravity-cli"}}
 	}
