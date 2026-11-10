@@ -1,44 +1,183 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/alexastrum/skl/src/skl"
 )
 
-const version = "1.0.0"
+// upstreamVersion is the vercel-labs/skills release that skl tracks.
+const upstreamVersion = "1.7.6"
+
+// version is the skl version. It mirrors upstreamVersion with the major
+// version set to 0 (skills 1.7.6 -> skl 0.7.6); TestVersionMirrorsUpstream
+// enforces this. It is a var so release builds can set it with
+// -ldflags "-X main.version=...".
+var version = "0.7.6"
+
+const (
+	reset = "\x1b[0m"
+	bold  = "\x1b[1m"
+	dim   = "\x1b[38;5;102m"
+	text  = "\x1b[38;5;145m"
+)
+
+var logoLines = []string{
+	"███████╗██╗  ██╗██╗     ",
+	"██╔════╝██║ ██╔╝██║     ",
+	"███████╗█████╔╝ ██║     ",
+	"╚════██║██╔═██╗ ██║     ",
+	"███████║██║  ██╗███████╗",
+	"╚══════╝╚═╝  ╚═╝╚══════╝",
+}
+
+var logoGrays = []string{
+	"\x1b[38;5;250m", "\x1b[38;5;248m", "\x1b[38;5;245m",
+	"\x1b[38;5;243m", "\x1b[38;5;240m", "\x1b[38;5;238m",
+}
+
+func showLogo(w io.Writer) {
+	fmt.Fprintln(w)
+	for i, line := range logoLines {
+		fmt.Fprintf(w, "%s%s%s\n", logoGrays[i], line, reset)
+	}
+}
+
+func showBanner(w io.Writer) {
+	showLogo(w)
+	fmt.Fprintf(w, "\n%sThe open agent skills ecosystem, in one Go binary%s\n\n", dim, reset)
+	row := func(cmd, arg, desc string) {
+		left := cmd
+		if arg != "" {
+			left += " " + dim + arg + reset
+		}
+		pad := 34 - len(cmd) - len(arg)
+		if arg != "" {
+			pad--
+		}
+		if pad < 1 {
+			pad = 1
+		}
+		fmt.Fprintf(w, "  %s$%s %s%s%s%s%s%s\n", dim, reset, text, left, reset, strings.Repeat(" ", pad), dim+desc, reset)
+	}
+	row("skl add", "<package>", "Add a new skill")
+	row("skl use", "<package>@<skill>", "Use a skill without installing")
+	row("skl remove", "", "Remove installed skills")
+	row("skl list", "", "List installed skills")
+	row("skl find", "[query]", "Search for skills")
+	fmt.Fprintln(w)
+	row("skl update", "", "Update installed skills")
+	row("skl check", "", "Check for skill updates")
+	fmt.Fprintln(w)
+	row("skl experimental_install", "", "Restore from skills-lock.json")
+	row("skl init", "[name]", "Create a new skill")
+	row("skl experimental_sync", "", "Sync skills from node_modules")
+	fmt.Fprintf(w, "\n%stry:%s skl add vercel-labs/agent-skills\n\n", dim, reset)
+	fmt.Fprintf(w, "Discover more skills at %shttps://skills.sh/%s\n\n", text, reset)
+}
 
 const helpMessage = `skl - Agent Skills CLI Manager
 
 Usage:
-  skl <command> [arguments]
+  skl <command> [options]
 
-Commands:
-  init [name]                      Initialize a new agent skill template in Cwd or a subfolder.
-  add <source>                     Install a local skill folder to project or global scope (aliases: a, i, install).
-  list                             List installed skills for detected agents (alias: ls).
-  remove <names...>                Uninstall and delete skill configurations (aliases: rm, r).
-  find <query>                     Search/retrieve an installed skill by name or slug (aliases: search, f, s).
-  update <name> [src]              Refresh installed skill(s) (aliases: check, upgrade).
-  config <set|get> <key> [value]   Configure settings (e.g. canonicalDir.global, canonicalDir.project).
+Manage Skills:
+  add <package>                    Add a skill package (alias: a). A local folder, owner/repo,
+                                   Git URL, well-known URL, direct SKILL.md or archive URL, or notion.
+  use <package>@<skill>            Print a prompt for one skill without installing it.
+  remove [skills...]               Remove installed skills (aliases: rm, r).
+  list                             List installed skills (alias: ls).
+  find [query]                     Search skills.sh, or installed skills with --local (aliases: search, f, s).
+
+Updates:
+  update [skills...]               Update skills to their latest versions (alias: upgrade).
+  check [skills...]                Report available updates without installing (exit 1 if any).
+
+Project:
+  install                          Without a package, restore skills from skills-lock.json (alias: i).
+  experimental_install             Restore skills from skills-lock.json.
+  init [name]                      Create <name>/SKILL.md or ./SKILL.md from a template.
   experimental_sync                Sync skills from node_modules into agent directories (alias: sync).
-  experimental_install             Restore all skills from skills-lock.json.
-  version                          Print CLI tool version (alias: -v, --version).
+  config <set|get> <key> [value]   Configure settings (canonicalDir.global, canonicalDir.project).
 
-Flags:
-  -g, --global                     Apply action to global scope (home directory).
-  -p, --project                    Apply action to project scope.
-  -y, --yes                        Skip confirmation prompts (automatic non-interactive).
-  --copy                           Force copy instead of symlink.
-  -a, --agent <name>               Filter action by agent type.
-  -v, --verbose                    Log all persistent file system changes.
+Add Options:
+  -g, --global                     Install globally (user level) instead of in the project.
+  -a, --agent <agents...>          Agents to install to (use '*' for all agents).
+  -s, --skill <skills...>          Skills to install (use '*' for all skills).
+  -l, --list                       List the skills in the source without installing.
+  -y, --yes                        Skip confirmation prompts.
+  --copy                           Copy files instead of symlinking agent directories.
+  --subagent <names...>            Install to Eve subagents ('root' for the root agent).
+  --all                            Shorthand for --skill '*' --agent '*' -y.
+  --full-depth                     Search all subdirectories even when a root SKILL.md exists.
+  --json                           Print results as JSON (no ANSI codes).
+
+Remove Options:
+  -g, --global                     Remove from the global scope.
+  -a, --agent <agents...>          Remove from these agents only (omit to clean all agent links).
+  -s, --skill <skills...>          Skills to remove (use '*' for all skills).
+  -y, --yes                        Skip the confirmation prompt.
+  --all                            Remove every installed skill (implies -y; do not combine with names).
+
+List Options:
+  -g, --global                     List global skills (default: project).
+  -a, --agent <agents...>          Filter by agents.
+  --json                           Print as JSON (no ANSI codes).
+
+Find Options:
+  --owner <owner>                  Search only repositories from one GitHub owner.
+  -l, --local                      Search installed project and global skills.
+  -j, --json                       Print results as JSON.
+
+Update and Check Options:
+  -g, --global                     Update global skills only.
+  -p, --project                    Update project skills only.
+  -y, --yes                        Skip the scope prompt (project if in a project, else global).
+
+Install (Restore) Options:
+  -a, --agent <agents...>          Link to these agents (default: last selected, else detected).
+  --dry-run                        Show what would be restored without installing anything.
+  --frozen-lockfile                Fail instead of changing skills-lock.json (default in CI).
+  --no-frozen-lockfile             Allow skills-lock.json to change in CI.
+  --force                          Reinstall skills that are already installed.
+  --copy                           Copy restored skills instead of symlinking them.
+
+Sync Options:
+  -a, --agent <agents...>          Agents to install to (use '*' for all agents).
+  -y, --yes                        Skip confirmation prompts.
+  --copy                           Copy skills instead of linking them to node_modules.
+  --dry-run                        Show what would change without changing anything.
+  --no-cleanup                     Keep skills that no dependency provides anymore.
+  --no-remote                      Skip git sources listed in package.json "skills" fields.
+  --frozen-lockfile                Fail instead of changing skills-lock.json (default in CI).
+  --no-frozen-lockfile             Allow skills-lock.json to change in CI.
+  -r, --recursive                  Also sync the dependencies of each workspace package.
+  --include <patterns...>          Only sync matching packages (<pkg>) or skills (<pkg>#<skill>).
+  --exclude <patterns...>          Skip matching packages (<pkg>) or skills (<pkg>#<skill>).
+  --json                           Print a JSON summary (no ANSI codes).
+
+Options:
+  -h, --help                       Show this help message (also after any command).
+  -v, --version                    Show the version number.
+
+Examples:
+  skl add vercel-labs/agent-skills
+  skl add vercel-labs/agent-skills --skill pr-review commit -a claude-code cursor
+  skl use vercel-labs/agent-skills@vercel-optimize | claude
+  skl remove web-design
+  skl ls -g --json
+  skl find react --owner vercel
+  skl check
+  skl update -g
+  skl install --frozen-lockfile
+  skl experimental_sync -y
+
+Discover more skills at https://skills.sh/
 `
 
 const initHelp = `skl init - Initialize a new agent skill template
@@ -51,24 +190,31 @@ Arguments:
                        If not provided, initializes in the current directory.
 
 Description:
-  Creates a basic SKILL.md template with default YAML frontmatter headers.
+  Creates a SKILL.md template with name and description frontmatter.
 `
 
-const addHelp = `skl add - Install an agent skill
+const addHelp = `skl add - Install agent skills
 
 Usage:
   skl add <source> [flags]
 
 Arguments:
-  <source>             Local folder path, Git repository URL, or GitHub owner/repo shorthand.
+  <source>                 Local folder, owner/repo[@skill], Git URL (#ref supported),
+                           well-known URL, direct SKILL.md or archive URL, or notion.
 
 Flags:
-  -g, --global         Install globally (in home directory).
-  -p, --project        Install locally in the current directory (default).
-  -y, --yes            Skip interactive prompts and accept defaults automatically.
-  --copy               Force copying of skill files instead of creating symbolic links.
-  -a, --agent <name>   Target a specific agent (default: auto-detects installed agents).
-  -v, --verbose        Log all file copy and symlink changes.
+  -g, --global             Install globally (in home directory).
+  -p, --project            Install in the current project (default).
+  -a, --agent <agents...>  Target agents (use '*' for all agents).
+  -s, --skill <skills...>  Skills to install (use '*' for all skills).
+  -l, --list               List the skills in the source without installing.
+  -y, --yes                Skip interactive prompts and accept defaults.
+  --copy                   Copy skill files instead of creating symbolic links.
+  --subagent <names...>    Install to Eve subagents ('root' for the root agent).
+  --all                    Shorthand for --skill '*' --agent '*' -y.
+  --full-depth             Search all subdirectories even when a root SKILL.md exists.
+  --json                   Print results as JSON.
+  -v, --verbose            Log all file copy and symlink changes.
 `
 
 const listHelp = `skl list - List installed agent skills
@@ -77,56 +223,63 @@ Usage:
   skl list [flags]
 
 Flags:
-  -g, --global         List global skl.
-  -p, --project        List project skills (default).
-  -a, --agent <name>   Filter results by agent type.
-  --json               Output as structured JSON.
+  -g, --global             List global skills.
+  -p, --project            List project skills (default).
+  -a, --agent <agents...>  Filter results by agents.
+  --json                   Output as structured JSON (tracked, untracked and missing status).
 `
 
 const removeHelp = `skl remove - Uninstall agent skills
 
 Usage:
-  skl remove [names...] [flags]
+  skl remove [skills...] [flags]
 
 Arguments:
-  [names...]           One or more names of the skills to remove.
-                       If not provided, starts interactive selection.
+  [skills...]              One or more skill names (or a lock source such as owner/repo).
+                           If not provided, starts interactive selection.
 
 Flags:
-  -g, --global         Remove from global scope.
-  -p, --project        Remove from project scope (default).
-  -y, --yes            Skip confirmation prompt.
-  --all                Uninstall all skills in the selected scope.
-  -a, --agent <name>   Target a specific agent for removal.
+  -g, --global             Remove from global scope.
+  -p, --project            Remove from project scope (default).
+  -a, --agent <agents...>  Remove from these agents only (omit to clean all agent links).
+  -s, --skill <skills...>  Skills to remove (use '*' for all skills).
+  -y, --yes                Skip confirmation prompt.
+  --all                    Uninstall all skills in the selected scope (implies -y).
 `
 
-const findHelp = `skl find - Search or retrieve installed skills
+const findHelp = `skl find - Search for skills
 
 Usage:
-  skl find <query> [flags]
+  skl find [query] [flags]
 
 Arguments:
-  <query>              Name, slug, or keyword to search for.
+  [query]                  Keywords to search skills.sh for. Without a query, starts an
+                           interactive search (prints usage tips in agents and pipes).
 
 Flags:
-  -l, --local          Search only locally installed skl.
-  -j, --json           Output search results in JSON format.
+  --owner <owner>          Search only repositories from one GitHub owner.
+  -l, --local              Search only locally installed skills.
+  -j, --json               Output search results in JSON format.
 `
 
-const updateHelp = `skl update - Update or refresh installed skills
+const updateHelp = `skl update - Update installed skills
 
 Usage:
-  skl update [name] [src] [flags]
+  skl update [skills...] [flags]
+  skl check [skills...] [flags]
 
 Arguments:
-  [name]               Name of the skill to update. If omitted, updates all skl.
-  [src]                Optional new source path or URL.
+  [skills...]              Names of skills to update. If omitted, updates all skills.
+
+Description:
+  update reinstalls skills whose source changed (or whose folder is missing).
+  check only reports available updates and exits 1 when any exist.
 
 Flags:
-  -g, --global         Update in global scope.
-  -p, --project        Update in project scope (default).
-  -y, --yes            Skip confirmation prompt.
-  -v, --verbose        Enable verbose output.
+  -g, --global             Update global skills only.
+  -p, --project            Update project skills only.
+  -y, --yes                Skip the scope prompt.
+  -v, --verbose            Enable verbose output.
 `
 
 const configHelp = `skl config - Manage configuration overrides
@@ -140,547 +293,245 @@ Keys:
   canonicalDir.project  Override the project base directory.
 `
 
-const syncHelp = `skl sync - Sync skills from node_modules
+const syncHelp = `skl experimental_sync - Sync skills from node_modules
 
 Usage:
   skl experimental_sync [flags]
 
 Flags:
-  -y, --yes            Skip confirmation prompt.
-  -f, --force          Force overwrite existing skl.
-  -v, --verbose        Enable verbose output.
-  -a, --agent <name>   Filter target agents (comma-separated).
+  -a, --agent <agents...>  Agents to install to (use '*' for all agents).
+  -y, --yes                Skip confirmation prompts.
+  --copy                   Copy skills instead of linking them to node_modules.
+  --dry-run                Show what would change without changing anything.
+  --no-cleanup             Keep skills that no dependency provides anymore.
+  --no-remote              Skip git sources listed in package.json "skills" fields.
+  --frozen-lockfile        Fail instead of changing skills-lock.json (default in CI).
+  --no-frozen-lockfile     Allow skills-lock.json to change in CI.
+  -r, --recursive          Also sync the dependencies of each workspace package.
+  --include <patterns...>  Only sync matching packages (<pkg>) or skills (<pkg>#<skill>).
+  --exclude <patterns...>  Skip matching packages (<pkg>) or skills (<pkg>#<skill>).
+  -f, --force              Replace destinations sync did not create.
+  --json                   Print a JSON summary.
 `
 
-const installHelp = `skl experimental_install - Restore skills from lockfile
+const installHelp = `skl install - Restore skills from skills-lock.json
 
 Usage:
-  skl experimental_install
+  skl install [flags]
+  skl experimental_install [flags]
+  skl install <source> [flags]    (same as skl add)
+
+Flags:
+  -a, --agent <agents...>  Link to these agents (default: last selected, else detected).
+  --dry-run                Show what would be restored without installing anything.
+  --frozen-lockfile        Fail instead of changing skills-lock.json (default in CI).
+  --no-frozen-lockfile     Allow skills-lock.json to change in CI.
+  --force                  Reinstall skills that are already installed.
+  --copy                   Copy restored skills instead of symlinking them.
 `
 
-func hasHelp(args []string) bool {
-	for _, arg := range args {
-		if arg == "help" || arg == "-h" || arg == "--help" {
-			return true
+// commandHelp returns the help text shown for `skl <cmd> --help`.
+func commandHelp(cmd string) string {
+	switch cmd {
+	case "add", "a":
+		return addHelp
+	case "use":
+		return skl.UseHelp()
+	case "remove", "rm", "r":
+		return removeHelp
+	case "list", "ls":
+		return listHelp
+	case "find", "search", "f", "s":
+		return findHelp
+	case "update", "upgrade", "check":
+		return updateHelp
+	case "init":
+		return initHelp
+	case "install", "i", "experimental_install":
+		return installHelp
+	case "sync", "experimental_sync":
+		return syncHelp
+	case "config":
+		return configHelp
+	}
+	return helpMessage
+}
+
+func hasFlag(args []string, flags ...string) bool {
+	for _, a := range args {
+		for _, f := range flags {
+			if a == f {
+				return true
+			}
 		}
-	}
-	return false
-}
-
-
-func isInteractive() bool {
-	fileInfo, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return (fileInfo.Mode() & os.ModeCharDevice) != 0
-}
-
-func projectSkillsExist() bool {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return false
-	}
-	if _, err := os.Stat(filepath.Join(cwd, "skills-lock.json")); err == nil {
-		return true
-	}
-	if _, err := os.Stat(filepath.Join(cwd, ".agents", "skills")); err == nil {
-		return true
 	}
 	return false
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Print(helpMessage)
-		os.Exit(0)
-	}
-
-	cmd := strings.ToLower(os.Args[1])
-	args := os.Args[2:]
-
-	switch cmd {
-	case "help", "-h", "--help":
-		fmt.Print(helpMessage)
-
-	case "version", "-v", "--version":
-		fmt.Printf("skl version %s\n", version)
-
-	case "init":
-		if hasHelp(args) {
-			fmt.Print(initHelp)
-			os.Exit(0)
-		}
-		var name string
-		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-			name = args[0]
-		}
-		path, err := skl.InitSkill(skl.InitOptions{
-			Name: name,
-		})
-		if err != nil {
-			if errors.Is(err, skl.ErrSkillAlreadyExists) {
-				fmt.Printf("⚠️  Warning: %v\n", err)
-				os.Exit(0)
-			}
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
-
-		displayDir := name
-		if displayDir == "" {
-			displayDir = "."
-		}
-
-		fmt.Println("\n\x1b[1;36m▲ Agent Skill Template Initialized Successfully!\x1b[0m")
-		fmt.Println("--------------------------------------------------")
-		fmt.Printf("📂 \x1b[1mWorkspace:\x1b[0m  %s\n", displayDir)
-		fmt.Printf("📄 \x1b[1mCreated:\x1b[0m    %s\n", filepath.Base(path))
-		fmt.Printf("📍 \x1b[1mLocation:\x1b[0m   %s\n", path)
-		fmt.Println("--------------------------------------------------")
-		fmt.Println("\n\x1b[1;32m👉 Next Steps:\x1b[0m")
-		fmt.Printf("  1. \x1b[1mEdit:\x1b[0m   Open and describe your custom instructions:\n")
-		if name != "" {
-			fmt.Printf("             \x1b[33m$ code %s/SKILL.md\x1b[0m\n", name)
-		} else {
-			fmt.Println("             \x1b[33m$ code SKILL.md\x1b[0m")
-		}
-		fmt.Printf("  2. \x1b[1mLink:\x1b[0m   Register the skill locally into your workspace:\n")
-		if name != "" {
-			fmt.Printf("             \x1b[33m$ skl add ./%s\x1b[0m\n", name)
-		} else {
-			fmt.Println("             \x1b[33m$ skl add .\x1b[0m")
-		}
-		fmt.Println("  3. \x1b[1mShare:\x1b[0m  Push your skill repo to GitHub or deploy as static URLs!")
-		fmt.Println("             To install remote skills, run:")
-		fmt.Printf("             \x1b[33m$ skl add <github-username>/<repo-name>\x1b[0m\n\n")
-
-	case "add", "i", "install", "a":
-		if hasHelp(args) {
-			fmt.Print(addHelp)
-			os.Exit(0)
-		}
-		source, opts := skl.ParseAddOptions(args)
-		if source == "" {
-			fmt.Println("Error: source skill path is required")
-			os.Exit(1)
-		}
-		err := skl.AddSkill(source, opts, "")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("Successfully installed skill.")
-
-	case "list", "ls":
-		if hasHelp(args) {
-			fmt.Print(listHelp)
-			os.Exit(0)
-		}
-		var opts skl.ListOptions
-		for i := 0; i < len(args); i++ {
-			arg := args[i]
-			if arg == "-g" || arg == "--global" {
-				opts.Global = true
-			} else if arg == "-a" || arg == "--agent" {
-				if i+1 < len(args) {
-					i++
-					opts.AgentFilter = append(opts.AgentFilter, skl.AgentType(args[i]))
-				}
-			}
-		}
-
-		installed, err := skl.ListInstalledSkills(opts)
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
-
-		if len(installed) == 0 {
-			fmt.Println("No skills found.")
-			return
-		}
-
-		// Support structured JSON output or pretty listing
-		var asJson bool
-		for _, arg := range args {
-			if arg == "--json" {
-				asJson = true
-				break
-			}
-		}
-
-		if asJson {
-			bytes, _ := json.MarshalIndent(installed, "", "  ")
-			fmt.Println(string(bytes))
-		} else {
-			fmt.Println("Installed Agent Skills:")
-			for _, s := range installed {
-				agentsStr := make([]string, len(s.Agents))
-				for i, a := range s.Agents {
-					agentsStr[i] = string(a)
-				}
-				fmt.Printf("  • %s (%s) - Scope: %s, Agents: %s\n", s.Name, s.Description, s.Scope, strings.Join(agentsStr, ", "))
-			}
-		}
-
-	case "remove", "rm", "r":
-		if hasHelp(args) {
-			fmt.Print(removeHelp)
-			os.Exit(0)
-		}
-		names, opts := skl.ParseRemoveOptions(args)
-		if len(names) == 0 && !opts.All {
-			if !opts.Yes && isInteractive() {
-				// Interactive removal selection
-				canonicalBase := skl.GetCanonicalSkillsDir(opts.Global, "")
-				var installedSkills []string
-				if _, err := os.Stat(canonicalBase); err == nil {
-					entries, err := os.ReadDir(canonicalBase)
-					if err == nil {
-						for _, entry := range entries {
-							if entry.IsDir() {
-								installedSkills = append(installedSkills, entry.Name())
-							}
-						}
-					}
-				}
-
-				if len(installedSkills) == 0 {
-					fmt.Println("No skills found to remove.")
-					os.Exit(0)
-				}
-
-				fmt.Println("Installed skills:")
-				for i, name := range installedSkills {
-					fmt.Printf("  %d) %s\n", i+1, name)
-				}
-
-				reader := bufio.NewReader(os.Stdin)
-				fmt.Print("Select skills to remove (comma-separated numbers, e.g. 1, 3): ")
-				input, err := reader.ReadString('\n')
-				if err != nil {
-					fmt.Printf("Error reading input: %v\n", err)
-					os.Exit(1)
-				}
-
-				input = strings.TrimSpace(input)
-				parts := strings.Split(input, ",")
-				for _, part := range parts {
-					part = strings.TrimSpace(part)
-					if part == "" {
-						continue
-					}
-					idx, err := strconv.Atoi(part)
-					if err != nil || idx < 1 || idx > len(installedSkills) {
-						fmt.Printf("Invalid selection: %q\n", part)
-						os.Exit(1)
-					}
-					names = append(names, installedSkills[idx-1])
-				}
-
-				if len(names) == 0 {
-					fmt.Println("No skills selected. Cancelled.")
-					os.Exit(0)
-				}
-			} else {
-				fmt.Println("Error: at least one skill name or --all flag is required")
-				os.Exit(1)
-			}
-		}
-
-		err := skl.RemoveSkills(names, opts, "")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("Successfully removed skill(s).")
-
-	case "find", "search", "f", "s":
-		if hasHelp(args) {
-			fmt.Print(findHelp)
-			os.Exit(0)
-		}
-		if len(args) < 1 {
-			fmt.Println("Error: search query is required")
-			os.Exit(1)
-		}
-		query := args[0]
-		var local bool
-		var jsonOutput bool
-
-		for _, arg := range args {
-			if arg == "-l" || arg == "--local" {
-				local = true
-			}
-			if arg == "-j" || arg == "--json" {
-				jsonOutput = true
-			}
-		}
-
-		res, err := skl.FindSkills(skl.FindOptions{
-			Query: query,
-			Local: local,
-		})
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
-
-		if len(res) == 0 {
-			fmt.Printf("No skills found matching %q.\n", query)
-			os.Exit(0)
-		}
-
-		if jsonOutput {
-			bytes, _ := json.MarshalIndent(res, "", "  ")
-			fmt.Println(string(bytes))
-			os.Exit(0)
-		}
-
-		fmt.Println("Install remote skills with: skl add <source>")
-		fmt.Println()
-		for _, s := range res {
-			if s.Scope == "remote" {
-				installsBadge := ""
-				if s.Installs > 0 {
-					installsBadge = fmt.Sprintf(" (%d installs)", s.Installs)
-				}
-				fmt.Printf("%s@%s%s\n", s.Source, s.Name, installsBadge)
-				fmt.Printf("  └ remote search result\n\n")
-			} else {
-				fmt.Printf("[local: %s] %s\n", s.Scope, s.Name)
-				if s.Description != "" {
-					fmt.Printf("  %s\n", s.Description)
-				}
-				fmt.Printf("  └ %s\n\n", s.Source)
-			}
-		}
-
-	case "update", "check", "upgrade":
-		if hasHelp(args) {
-			fmt.Print(updateHelp)
-			os.Exit(0)
-		}
-		var name string
-		var src string
-		var globalFlag bool
-		var projectFlag bool
-		var yesFlag bool
-		var verboseFlag bool
-
-		for i := 0; i < len(args); i++ {
-			arg := args[i]
-			if arg == "-g" || arg == "--global" {
-				globalFlag = true
-			} else if arg == "-p" || arg == "--project" {
-				projectFlag = true
-			} else if arg == "-y" || arg == "--yes" {
-				yesFlag = true
-			} else if arg == "-v" || arg == "--verbose" {
-				verboseFlag = true
-			} else if !strings.HasPrefix(arg, "-") {
-				if name == "" {
-					name = arg
-				} else if src == "" {
-					src = arg
-				}
-			}
-		}
-
-		if name != "" {
-			// Single skill update
-			opts := skl.UpdateOptions{
-				Global:  globalFlag,
-				Verbose: verboseFlag,
-			}
-			err := skl.UpdateSkill(name, src, opts)
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-				os.Exit(1)
-			}
-			if src != "" {
-				fmt.Printf("Successfully updated skill %q from source %q.\n", name, src)
-			} else {
-				fmt.Printf("Successfully refreshed skill %q.\n", name)
-			}
-		} else {
-			// Bulk update
-			var scope string
-			if globalFlag && projectFlag {
-				scope = "both"
-			} else if globalFlag {
-				scope = "global"
-			} else if projectFlag {
-				scope = "project"
-			} else {
-				if yesFlag || !isInteractive() {
-					if projectSkillsExist() {
-						scope = "project"
-					} else {
-						scope = "global"
-					}
-				} else {
-					fmt.Println("Select update scope:")
-					fmt.Println("  1) Project (Update skills in current directory)")
-					fmt.Println("  2) Global (Update skills in home directory)")
-					fmt.Println("  3) Both (Update all skills)")
-					reader := bufio.NewReader(os.Stdin)
-					fmt.Print("Selection (1-3): ")
-					input, err := reader.ReadString('\n')
-					if err != nil {
-						fmt.Printf("Error reading input: %v\n", err)
-						os.Exit(1)
-					}
-					input = strings.TrimSpace(input)
-					switch input {
-					case "1":
-						scope = "project"
-					case "2":
-						scope = "global"
-					case "3":
-						scope = "both"
-					default:
-						fmt.Println("Invalid selection. Cancelled.")
-						os.Exit(0)
-					}
-				}
-			}
-
-			var updateSkillsInScope = func(global bool) {
-				canonicalBase := skl.GetCanonicalSkillsDir(global, "")
-				var installedSkills []string
-				if _, err := os.Stat(canonicalBase); err == nil {
-					entries, err := os.ReadDir(canonicalBase)
-					if err == nil {
-						for _, entry := range entries {
-							if entry.IsDir() {
-								installedSkills = append(installedSkills, entry.Name())
-							}
-						}
-					}
-				}
-
-				if len(installedSkills) == 0 {
-					scopeName := "project"
-					if global {
-						scopeName = "global"
-					}
-					fmt.Printf("No installed skills found in %s scope.\n", scopeName)
-					return
-				}
-
-				scopeName := "Project"
-				if global {
-					scopeName = "Global"
-				}
-				fmt.Printf("Updating %s Skills:\n", scopeName)
-				opts := skl.UpdateOptions{
-					Global:  global,
-					Verbose: verboseFlag,
-				}
-				for _, sName := range installedSkills {
-					fmt.Printf("  • Updating skill %q...\n", sName)
-					err := skl.UpdateSkill(sName, "", opts)
-					if err != nil {
-						fmt.Printf("    ⚠️ Failed: %v\n", err)
-					} else {
-						fmt.Printf("    ✓ Successfully updated %q\n", sName)
-					}
-				}
-			}
-
-			if scope == "project" || scope == "both" {
-				updateSkillsInScope(false)
-			}
-			if scope == "global" || scope == "both" {
-				updateSkillsInScope(true)
-			}
-		}
-
-	case "config":
-		if hasHelp(args) {
-			fmt.Print(configHelp)
-			os.Exit(0)
-		}
-		if len(args) < 2 {
-			fmt.Println("Error: usage:\n  skl config set <key> <value>\n  skl config get <key>")
-			os.Exit(1)
-		}
-		subCmd := strings.ToLower(args[0])
-		if subCmd == "set" {
-			if len(args) < 3 {
-				fmt.Println("Error: value is required for set")
-				os.Exit(1)
-			}
-			key := args[1]
-			val := args[2]
-			err := skl.SetConfigKey(key, val)
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Printf("Successfully set %s = %s\n", key, val)
-		} else if subCmd == "get" {
-			key := args[1]
-			val, err := skl.GetConfigKey(key)
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Println(val)
-		} else {
-			fmt.Printf("Unknown config subcommand %q\n", subCmd)
-			os.Exit(1)
-		}
-
-	case "experimental_sync", "sync":
-		if hasHelp(args) {
-			fmt.Print(syncHelp)
-			os.Exit(0)
-		}
-		var opts skl.SyncOptions
-		for i := 0; i < len(args); i++ {
-			arg := args[i]
-			if arg == "-y" || arg == "--yes" {
-				opts.Yes = true
-			} else if arg == "-f" || arg == "--force" {
-				opts.Force = true
-			} else if arg == "-v" || arg == "--verbose" {
-				opts.Verbose = true
-			} else if arg == "-a" || arg == "--agent" {
-				if i+1 < len(args) {
-					i++
-					parts := strings.Split(args[i], ",")
-					for _, part := range parts {
-						trimmed := strings.TrimSpace(part)
-						if trimmed != "" {
-							opts.Agent = append(opts.Agent, skl.AgentType(trimmed))
-						}
-					}
-				}
-			}
-		}
-		err := skl.SyncSkills(args, opts, "")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
-
-	case "experimental_install":
-		if hasHelp(args) {
-			fmt.Print(installHelp)
-			os.Exit(0)
-		}
-		err := skl.RestoreFromLock(args, "")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
-
-	default:
-		fmt.Printf("Unknown command %q. Run with --help for options.\n", cmd)
-		os.Exit(1)
-	}
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+// run executes one CLI invocation and returns the exit code.
+func run(args []string, stdout, stderr io.Writer) int {
+	inAgent := skl.IsRunningInAgent()
+	if len(args) == 0 {
+		if !inAgent {
+			showBanner(stdout)
+		}
+		return 0
+	}
+
+	rawCmd := args[0]
+	lower := strings.ToLower(rawCmd)
+	rest := args[1:]
+
+	switch lower {
+	case "--help", "-h", "help":
+		fmt.Fprint(stdout, helpMessage)
+		return 0
+	case "--version", "-v", "version":
+		fmt.Fprintln(stdout, version)
+		return 0
+	}
+
+	// `<cmd> --help` never runs the command. A bare "help" argument is not a help
+	// flag, so `skl find help` and `skl remove help` still work.
+	if hasFlag(rest, "--help", "-h") {
+		fmt.Fprint(stdout, commandHelp(rawCmd))
+		return 0
+	}
+
+	skl.FindInstallFunc = func(source, skillName string) int {
+		return skl.RunAdd([]string{source, "--skill", skillName})
+	}
+
+	switch rawCmd {
+	case "add", "a", "install", "i":
+		parsed := skl.ParseAddCLIOptions(rest)
+		if (rawCmd == "install" || rawCmd == "i") && len(parsed.Sources) == 0 {
+			// #2683: `skl install` without a package restores skills-lock.json.
+			if !inAgent {
+				showLogo(stdout)
+			}
+			return skl.RunInstallFromLock(rest, "")
+		}
+		if !inAgent && !parsed.Options.JSON {
+			showLogo(stdout)
+		}
+		return skl.RunAddParsed(parsed, skl.AddIO{Stdout: stdout, Stderr: stderr})
+	case "experimental_install":
+		if !inAgent {
+			showLogo(stdout)
+		}
+		return skl.RunInstallFromLock(rest, "")
+	case "use":
+		return skl.RunUse(rest)
+	case "remove", "rm", "r":
+		names, opts := skl.ParseRemoveOptions(rest)
+		return skl.RunRemove(names, opts, "")
+	case "list", "ls":
+		return skl.RunList(rest, "")
+	case "find", "search", "f", "s":
+		_, findOpts, _ := skl.ParseFindOptions(rest)
+		if !inAgent && !findOpts.JSON {
+			showLogo(stdout)
+		}
+		if !findOpts.JSON {
+			fmt.Fprintln(stdout)
+		}
+		return skl.RunFind(rest, "")
+	case "check":
+		return skl.RunUpdate(rest, skl.UpdateModeCheck, "")
+	case "update", "upgrade":
+		return skl.RunUpdate(rest, skl.UpdateModeUpdate, "")
+	case "sync", "experimental_sync":
+		opts := skl.ParseSyncOptions(rest)
+		if !inAgent && !opts.JSON {
+			showLogo(stdout)
+		}
+		return skl.RunSync(rest, opts, "")
+	case "init":
+		if !inAgent {
+			showLogo(stdout)
+		}
+		fmt.Fprintln(stdout)
+		return runInit(rest, stdout, stderr)
+	}
+	if lower == "config" {
+		return runConfig(rest, stdout, stderr)
+	}
+
+	fmt.Fprintln(stdout, skl.FormatError(skl.NewDiagnostic(skl.CodeUnknownCommand,
+		"Unknown command: "+rawCmd, "Run skl --help for usage.")))
+	return 1
+}
+
+func runInit(args []string, stdout, stderr io.Writer) int {
+	var name string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		name = args[0]
+	}
+	path, err := skl.InitSkill(skl.InitOptions{Name: name})
+	displayPath := "SKILL.md"
+	if name != "" {
+		displayPath = name + "/SKILL.md"
+	}
+	if err != nil {
+		if errors.Is(err, skl.ErrSkillAlreadyExists) {
+			fmt.Fprintf(stdout, "%sSkill already exists at %s%s%s\n", text, dim, displayPath, reset)
+			return 0
+		}
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
+	skillName := name
+	if skillName == "" {
+		skillName = filepath.Base(filepath.Dir(path))
+	}
+	fmt.Fprintf(stdout, "%sInitialized skill: %s%s%s\n\n", text, dim, skillName, reset)
+	fmt.Fprintf(stdout, "%sCreated:%s\n  %s\n\n", dim, reset, displayPath)
+	fmt.Fprintf(stdout, "%sNext steps:%s\n", dim, reset)
+	fmt.Fprintf(stdout, "  1. Edit %s%s%s to define your skill instructions\n", text, displayPath, reset)
+	fmt.Fprintf(stdout, "  2. Update the %sname%s and %sdescription%s in the frontmatter\n", text, reset, text, reset)
+	addTarget := "."
+	if name != "" {
+		addTarget = "./" + name
+	}
+	fmt.Fprintf(stdout, "  3. Try it locally with %sskl add %s%s\n\n", text, addTarget, reset)
+	fmt.Fprintf(stdout, "%sPublishing:%s\n", dim, reset)
+	fmt.Fprintf(stdout, "  %sGitHub:%s  Push to a repo, then %sskl add <owner>/<repo>%s\n", dim, reset, text, reset)
+	fmt.Fprintf(stdout, "  %sURL:%s     Host the file, then %sskl add https://example.com/%s%s\n\n", dim, reset, text, displayPath, reset)
+	fmt.Fprintf(stdout, "Browse existing skills for inspiration at %shttps://skills.sh/%s\n\n", text, reset)
+	return 0
+}
+
+func runConfig(args []string, stdout, stderr io.Writer) int {
+	if len(args) < 2 {
+		fmt.Fprintln(stderr, "Error: usage:\n  skl config set <key> <value>\n  skl config get <key>")
+		return 1
+	}
+	switch strings.ToLower(args[0]) {
+	case "set":
+		if len(args) < 3 {
+			fmt.Fprintln(stderr, "Error: value is required for set")
+			return 1
+		}
+		if err := skl.SetConfigKey(args[1], args[2]); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "Successfully set %s = %s\n", args[1], args[2])
+		return 0
+	case "get":
+		val, err := skl.GetConfigKey(args[1])
+		if err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, val)
+		return 0
+	}
+	fmt.Fprintf(stderr, "Unknown config subcommand %q\n", args[0])
+	return 1
+}

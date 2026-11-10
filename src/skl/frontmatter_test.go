@@ -1,7 +1,10 @@
 package skl
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -14,7 +17,7 @@ func TestParseFrontmatter(t *testing.T) {
 		wantErr     bool
 	}{
 		{
-			name: "Standard frontmatter",
+			name: "Standard frontmatter LF",
 			input: `---
 name: my-skill
 description: A description
@@ -26,6 +29,27 @@ description: A description
 				"description": "A description",
 			},
 			wantContent: "# Content\n",
+			wantErr:     false,
+		},
+		{
+			name:        "CRLF frontmatter",
+			input:       "---\r\nname: example\r\ndescription: Example skill\r\n---\r\n# Body\r\n",
+			wantData:    map[string]interface{}{"name": "example", "description": "Example skill"},
+			wantContent: "# Body\r\n",
+			wantErr:     false,
+		},
+		{
+			name:        "UTF-8 BOM and LF (#97640fb)",
+			input:       "\uFEFF---\nname: example\ndescription: Example skill\n---\n# Body\n",
+			wantData:    map[string]interface{}{"name": "example", "description": "Example skill"},
+			wantContent: "# Body\n",
+			wantErr:     false,
+		},
+		{
+			name:        "UTF-8 BOM and CRLF (#97640fb)",
+			input:       "\uFEFF---\r\nname: example\r\ndescription: Example skill\r\n---\r\n# Body\r\n",
+			wantData:    map[string]interface{}{"name": "example", "description": "Example skill"},
+			wantContent: "# Body\r\n",
 			wantErr:     false,
 		},
 		{
@@ -60,6 +84,27 @@ Body
 			wantErr:     false,
 		},
 		{
+			name:        "BOM without frontmatter preserved",
+			input:       "\uFEFF# Body\n",
+			wantData:    map[string]interface{}{},
+			wantContent: "\uFEFF# Body\n",
+			wantErr:     false,
+		},
+		{
+			name:        "JavaScript frontmatter unsupported",
+			input:       "---js\n({ name: \"example\", description: \"Example skill\" })\n---\n# Body",
+			wantData:    map[string]interface{}{},
+			wantContent: "---js\n({ name: \"example\", description: \"Example skill\" })\n---\n# Body",
+			wantErr:     false,
+		},
+		{
+			name:        "BOM + JavaScript frontmatter unsupported",
+			input:       "\uFEFF---js\n({ name: \"example\", description: \"Example skill\" })\n---\n# Body",
+			wantData:    map[string]interface{}{},
+			wantContent: "\uFEFF---js\n({ name: \"example\", description: \"Example skill\" })\n---\n# Body",
+			wantErr:     false,
+		},
+		{
 			name: "Missing closing delimiter",
 			input: `---
 name: unclosed
@@ -70,15 +115,50 @@ description: oops
 			wantContent: "---\nname: unclosed\ndescription: oops\n# Just content\n",
 			wantErr:     false,
 		},
+		// Upstream /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/ needs a newline before the
+		// closing ---, so adjacent delimiters are not frontmatter. Expected values come from
+		// running that regex in Node.
 		{
-			name: "Empty frontmatter",
-			input: `---
----
-# Content
-`,
+			name:        "Adjacent delimiters are not frontmatter",
+			input:       "---\n---\n# Content\n",
+			wantData:    map[string]interface{}{},
+			wantContent: "---\n---\n# Content\n",
+		},
+		{
+			name:        "Empty frontmatter",
+			input:       "---\n\n---\n# Content\n",
 			wantData:    map[string]interface{}{},
 			wantContent: "# Content\n",
-			wantErr:     false,
+		},
+		{
+			name:        "Closing line of four dashes closes",
+			input:       "---\nname: a\n----\nbody",
+			wantData:    map[string]interface{}{"name": "a"},
+			wantContent: "-\nbody",
+		},
+		{
+			name:        "Closing line with trailing comment closes",
+			input:       "---\nname: a\n--- # x\nbody",
+			wantData:    map[string]interface{}{"name": "a"},
+			wantContent: " # x\nbody",
+		},
+		{
+			name:        "Closing dashes glued to text close",
+			input:       "---\nname: a\n---x\nbody",
+			wantData:    map[string]interface{}{"name": "a"},
+			wantContent: "x\nbody",
+		},
+		{
+			name:        "Only one CR and one LF consumed after closing",
+			input:       "---\nname: a\n---\r\r\nbody",
+			wantData:    map[string]interface{}{"name": "a"},
+			wantContent: "\r\nbody",
+		},
+		{
+			name:        "Closing at end of input",
+			input:       "---\nname: a\n---",
+			wantData:    map[string]interface{}{"name": "a"},
+			wantContent: "",
 		},
 	}
 
@@ -95,5 +175,106 @@ description: oops
 				t.Errorf("ParseFrontmatter() gotContent = %q, want %q", gotContent, tt.wantContent)
 			}
 		})
+	}
+}
+
+func TestValidateSkillMetadataAndParseSkillMd(t *testing.T) {
+	// Valid metadata with multiline / ANSI stripped
+	name, desc, err := ValidateSkillMetadata(map[string]interface{}{
+		"name":        "  \x1b[32mmy-skill\x1b[0m  ",
+		"description": "Line 1\nLine 2",
+	})
+	if err != nil || name != "my-skill" || desc != "Line 1 Line 2" {
+		t.Fatalf("ValidateSkillMetadata valid = (%q, %q, %v)", name, desc, err)
+	}
+
+	// Missing fields
+	if _, _, err := ValidateSkillMetadata(map[string]interface{}{"name": "only-name"}); err == nil || !strings.Contains(err.Error(), "description") {
+		t.Errorf("expected missing description error, got %v", err)
+	}
+
+	// Non-string fields (e.g. YAML boolean or integer)
+	if _, _, err := ValidateSkillMetadata(map[string]interface{}{"name": 123, "description": true}); err == nil || !strings.Contains(err.Error(), "must be strings") {
+		t.Errorf("expected non-string error, got %v", err)
+	}
+
+	// Whitespace-only or ANSI-only after normalization (#2473)
+	for _, bad := range []map[string]interface{}{
+		{"name": "   \t\n  ", "description": "valid"},
+		{"name": "valid", "description": "  \r\n\t "},
+		{"name": "\x1b[31m\x1b[0m", "description": "valid"},
+	} {
+		if _, _, err := ValidateSkillMetadata(bad); err == nil || !strings.Contains(err.Error(), "empty required frontmatter") {
+			t.Errorf("expected empty required frontmatter error for %+v, got %v", bad, err)
+		}
+	}
+
+	// ParseSkillMd with BOM + internal skill handling
+	dir := t.TempDir()
+	bomSkillPath := filepath.Join(dir, "SKILL.md")
+	raw := "\uFEFF---\r\nname: bom-skill\r\ndescription: Loaded with BOM\r\nmetadata:\r\n  internal: true\r\n---\r\n# Body\r\n"
+	_ = os.WriteFile(bomSkillPath, []byte(raw), 0644)
+
+	t.Setenv("INSTALL_INTERNAL_SKILLS", "")
+	sk, err := ParseSkillMd(bomSkillPath, false)
+	if err != nil || sk != nil {
+		t.Errorf("expected internal skill skipped when includeInternal=false, got (%+v, %v)", sk, err)
+	}
+
+	sk2, err := ParseSkillMd(bomSkillPath, true)
+	if err != nil || sk2 == nil || sk2.Name != "bom-skill" || sk2.RawContent != raw {
+		t.Errorf("expected internal skill loaded when includeInternal=true, got (%+v, %v)", sk2, err)
+	}
+
+	t.Setenv("INSTALL_INTERNAL_SKILLS", "1")
+	sk3, err := ParseSkillMd(bomSkillPath, false)
+	if err != nil || sk3 == nil || sk3.Name != "bom-skill" {
+		t.Errorf("expected internal skill loaded when INSTALL_INTERNAL_SKILLS=1, got (%+v, %v)", sk3, err)
+	}
+}
+
+// Review #41 item 4: a SKILL.md symlink that resolves outside its skill directory must not be
+// read (its contents would otherwise bypass the #2652 copy confinement via Skill.RawContent).
+func TestParseSkillMdRefusesEscapingSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "secret.md")
+	if err := os.WriteFile(outside, []byte("---\nname: leaked\ndescription: secret\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	skillDir := filepath.Join(root, "skill")
+	if err := os.MkdirAll(filepath.Join(skillDir, "docs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(skillDir, "SKILL.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	skill, err := ParseSkillMd(filepath.Join(skillDir, "SKILL.md"), true)
+	if err == nil || DiagnosticCode(err) != CodeSymlinkOutsideSkill {
+		t.Fatalf("ParseSkillMd(escaping symlink) = (%v, %v), want %s", skill, err, CodeSymlinkOutsideSkill)
+	}
+
+	// A link that stays inside the skill directory is fine.
+	inside := filepath.Join(skillDir, "docs", "skill.md")
+	if err := os.WriteFile(inside, []byte("---\nname: ok\ndescription: fine\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(skillDir, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("docs", "skill.md"), filepath.Join(skillDir, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := ParseSkillMd(filepath.Join(skillDir, "SKILL.md"), true); err != nil || s == nil || s.Name != "ok" {
+		t.Errorf("ParseSkillMd(inside symlink) = (%v, %v)", s, err)
+	}
+
+	// A symlinked skill directory (e.g. an agent dir linking to the canonical copy) is fine.
+	linkedDir := filepath.Join(root, "linked")
+	if err := os.Symlink(skillDir, linkedDir); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := ParseSkillMd(filepath.Join(linkedDir, "SKILL.md"), true); err != nil || s == nil || s.Name != "ok" {
+		t.Errorf("ParseSkillMd(via symlinked dir) = (%v, %v)", s, err)
 	}
 }

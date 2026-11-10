@@ -1,17 +1,44 @@
 package skl
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ErrSkillAlreadyExists is returned when the target SKILL.md file already exists.
 var ErrSkillAlreadyExists = errors.New("skill already exists")
 
+func formatSkillFrontmatter(name, description string) (string, error) {
+	doc := struct {
+		Name        string `yaml:"name"`
+		Description string `yaml:"description"`
+	}{
+		Name:        name,
+		Description: description,
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(doc); err != nil {
+		_ = enc.Close()
+		return "", err
+	}
+	if err := enc.Close(); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(buf.String(), "\r\n"), nil
+}
+
 // InitSkill initializes a new skill directory and template SKILL.md.
 // If Name is provided, it creates a subdirectory; otherwise it initializes in Cwd.
+// Special YAML characters in skill names (colons, hashes, quotes, booleans, numbers)
+// are safely escaped via yaml.v3 (#2507).
 // It returns the path of the created SKILL.md file or an error.
 func InitSkill(opts InitOptions) (string, error) {
 	cwd := opts.Cwd
@@ -52,9 +79,13 @@ func InitSkill(opts InitOptions) (string, error) {
 		}
 	}
 
+	fmText, err := formatSkillFrontmatter(skillName, "A brief description of what this skill does")
+	if err != nil {
+		return "", fmt.Errorf("marshal skill frontmatter: %w", err)
+	}
+
 	skillContent := fmt.Sprintf(`---
-name: %s
-description: A brief description of what this skill does
+%s
 ---
 
 # %s
@@ -70,7 +101,7 @@ Describe when this skill should be used.
 1. First step
 2. Second step
 3. Additional steps as needed
-`, skillName, skillName)
+`, fmText, skillName)
 
 	if err := os.WriteFile(skillFile, []byte(skillContent), 0644); err != nil {
 		return "", fmt.Errorf("write skill template: %w", err)

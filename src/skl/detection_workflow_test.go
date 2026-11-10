@@ -31,10 +31,18 @@ func createAgentMarker(t *testing.T, agent AgentType, home, configHome, cwd stri
 		_ = os.MkdirAll(filepath.Join(configHome, "amp"), 0755)
 	case "antigravity":
 		_ = os.MkdirAll(filepath.Join(home, ".gemini", "antigravity"), 0755)
+	case "antigravity-cli":
+		_ = os.MkdirAll(filepath.Join(home, ".gemini", "antigravity-cli"), 0755)
+	case "astrbot":
+		_ = os.MkdirAll(filepath.Join(home, ".astrbot"), 0755)
+	case "autohand-code":
+		_ = os.MkdirAll(filepath.Join(home, ".autohand"), 0755)
 	case "augment":
 		_ = os.MkdirAll(filepath.Join(home, ".augment"), 0755)
 	case "bob":
 		_ = os.MkdirAll(filepath.Join(home, ".bob"), 0755)
+	case "claude-code":
+		_ = os.MkdirAll(filepath.Join(home, ".claude"), 0755)
 	case "openclaw":
 		_ = os.MkdirAll(filepath.Join(home, ".openclaw"), 0755)
 	case "cline":
@@ -47,6 +55,8 @@ func createAgentMarker(t *testing.T, agent AgentType, home, configHome, cwd stri
 		_ = os.MkdirAll(filepath.Join(home, ".codemaker"), 0755)
 	case "codestudio":
 		_ = os.MkdirAll(filepath.Join(home, ".codestudio"), 0755)
+	case "codex":
+		_ = os.MkdirAll(filepath.Join(home, ".codex"), 0755)
 	case "command-code":
 		_ = os.MkdirAll(filepath.Join(home, ".commandcode"), 0755)
 	case "continue":
@@ -65,52 +75,89 @@ func createAgentMarker(t *testing.T, agent AgentType, home, configHome, cwd stri
 		_ = os.MkdirAll(filepath.Join(home, ".dexto"), 0755)
 	case "droid":
 		_ = os.MkdirAll(filepath.Join(home, ".factory"), 0755)
+	case "eve":
+		_ = os.MkdirAll(filepath.Join(cwd, "agent"), 0755)
+		_ = os.WriteFile(filepath.Join(cwd, "package.json"), []byte(`{"dependencies":{"eve":"^1.0.0"}}`), 0644)
 	case "firebender":
 		_ = os.MkdirAll(filepath.Join(home, ".firebender"), 0755)
 	case "forgecode":
 		_ = os.MkdirAll(filepath.Join(home, ".forge"), 0755)
+	case "fx":
+		_ = os.MkdirAll(filepath.Join(home, ".fx"), 0755)
 	case "gemini-cli":
 		_ = os.MkdirAll(filepath.Join(home, ".gemini"), 0755)
 	case "github-copilot":
 		_ = os.MkdirAll(filepath.Join(home, ".copilot"), 0755)
 	case "goose":
 		_ = os.MkdirAll(filepath.Join(configHome, "goose"), 0755)
+	case "grok":
+		_ = os.MkdirAll(filepath.Join(home, ".grok"), 0755)
 	case "hermes-agent":
 		_ = os.MkdirAll(filepath.Join(home, ".hermes"), 0755)
+	case "inference-sh":
+		_ = os.MkdirAll(filepath.Join(home, ".inferencesh"), 0755)
+	case "jazz":
+		_ = os.MkdirAll(filepath.Join(home, ".jazz"), 0755)
 	case "junie":
 		_ = os.MkdirAll(filepath.Join(home, ".junie"), 0755)
 	case "iflow-cli":
 		_ = os.MkdirAll(filepath.Join(home, ".iflow"), 0755)
 	case "kilo":
 		_ = os.MkdirAll(filepath.Join(home, ".kilocode"), 0755)
-	case "kimi-cli":
-		_ = os.MkdirAll(filepath.Join(home, ".kimi"), 0755)
+	case "kimchi":
+		_ = os.MkdirAll(filepath.Join(home, ".config", "kimchi"), 0755)
+	case "kimi-code-cli":
+		_ = os.MkdirAll(filepath.Join(home, ".kimi-code"), 0755)
 	case "kiro-cli":
 		_ = os.MkdirAll(filepath.Join(home, ".kiro"), 0755)
 	case "kode":
 		_ = os.MkdirAll(filepath.Join(home, ".kode"), 0755)
+	case "lingma":
+		_ = os.MkdirAll(filepath.Join(home, ".lingma"), 0755)
+	case "loaf":
+		_ = os.MkdirAll(filepath.Join(home, ".loaf"), 0755)
 	case "mcpjam":
 		_ = os.MkdirAll(filepath.Join(home, ".mcpjam"), 0755)
+	case "minimax-code":
+		_ = os.MkdirAll(filepath.Join(home, ".minimax"), 0755)
+	case "mistral-vibe":
+		_ = os.MkdirAll(filepath.Join(home, ".vibe"), 0755)
+	case "moxby":
+		_ = os.MkdirAll(filepath.Join(home, ".moxby"), 0755)
 	case "mux":
 		_ = os.MkdirAll(filepath.Join(home, ".mux"), 0755)
 	case "opencode":
 		_ = os.MkdirAll(filepath.Join(configHome, "opencode"), 0755)
 	case "openhands":
 		_ = os.MkdirAll(filepath.Join(home, ".openhands"), 0755)
+	case "ona":
+		_ = os.MkdirAll(filepath.Join(home, ".ona"), 0755)
 	case "pi":
 		_ = os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0755)
+	case "posit-assistant":
+		_ = os.MkdirAll(filepath.Join(home, ".posit", "assistant"), 0755)
 	case "qoder":
 		_ = os.MkdirAll(filepath.Join(home, ".qoder"), 0755)
+	case "qoder-cn":
+		_ = os.MkdirAll(filepath.Join(home, ".qoder-cn"), 0755)
 	case "qwen-code":
 		_ = os.MkdirAll(filepath.Join(home, ".qwen"), 0755)
 	case "replit":
 		_ = os.MkdirAll(filepath.Join(cwd, ".replit"), 0755)
+	case "reasonix":
+		_ = os.MkdirAll(filepath.Join(home, ".reasonix"), 0755)
 	case "rovodev":
 		_ = os.MkdirAll(filepath.Join(home, ".rovodev"), 0755)
 	case "roo":
 		_ = os.MkdirAll(filepath.Join(home, ".roo"), 0755)
+	case "sarvam-code":
+		_ = os.MkdirAll(filepath.Join(home, ".sarvam"), 0755)
 	case "tabnine-cli":
 		_ = os.MkdirAll(filepath.Join(home, ".tabnine"), 0755)
+	case "terramind":
+		_ = os.MkdirAll(filepath.Join(home, ".terramind"), 0755)
+	case "tinycloud":
+		_ = os.MkdirAll(filepath.Join(home, ".tinycloud"), 0755)
 	case "trae":
 		_ = os.MkdirAll(filepath.Join(home, ".trae"), 0755)
 	case "trae-cn":
@@ -121,15 +168,37 @@ func createAgentMarker(t *testing.T, agent AgentType, home, configHome, cwd stri
 		_ = os.MkdirAll(filepath.Join(home, ".codeium", "windsurf"), 0755)
 	case "zed":
 		_ = os.MkdirAll(filepath.Join(configHome, "zed"), 0755)
+	case "zcode":
+		_ = os.MkdirAll(filepath.Join(home, ".zcode"), 0755)
 	case "zencoder":
+		_ = os.MkdirAll(filepath.Join(home, ".zencoder"), 0755)
+	case "zenflow":
 		_ = os.MkdirAll(filepath.Join(home, ".zencoder"), 0755)
 	case "neovate":
 		_ = os.MkdirAll(filepath.Join(home, ".neovate"), 0755)
 	case "pochi":
 		_ = os.MkdirAll(filepath.Join(home, ".pochi"), 0755)
+	case "promptscript":
+		_ = os.MkdirAll(filepath.Join(cwd, ".promptscript"), 0755)
 	case "adal":
 		_ = os.MkdirAll(filepath.Join(home, ".adal"), 0755)
 	}
+}
+
+// isolateTestHome points HOME, USERPROFILE, XDG_CONFIG_HOME and XDG_STATE_HOME at temp dirs,
+// clears agent home overrides, and rebuilds Agents from that environment, so a test never reads
+// agent directories under, or writes the global .skill-lock.json into, the real home or state
+// dir. Callers that replace Agents must save and restore it themselves.
+func isolateTestHome(t *testing.T, home, configHome string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	for _, v := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "VIBE_HOME", "HERMES_HOME", "AUTOHAND_HOME", "GROK_HOME", "SARVAM_HOME", "REASONIX_HOME"} {
+		t.Setenv(v, "")
+	}
+	RefreshAgents()
 }
 
 // 1. no agents installed: verify that it installs to antigravity and outputs the agy-cli onboarding tip.
@@ -138,14 +207,14 @@ func TestIntegration_NoAgents(t *testing.T) {
 	defer func() { Agents = origAgents }()
 
 	tmpDir := t.TempDir()
+	isolateTestHome(t, tmpDir, tmpDir)
 
-	// Mock Agents map
 	Agents = make(map[AgentType]AgentConfig)
 	Agents["antigravity"] = AgentConfig{
 		Name:            "antigravity",
 		DisplayName:     "Antigravity",
 		SkillsDir:       ".agents/skills",
-		GlobalSkillsDir: filepath.Join(tmpDir, ".gemini", "antigravity", "skills"),
+		GlobalSkillsDir: filepath.Join(tmpDir, ".gemini", "config", "skills"),
 		DetectInstalled: func(home, configHome, cwd string) bool {
 			return false
 		},
@@ -160,23 +229,15 @@ func TestIntegration_NoAgents(t *testing.T) {
 		},
 	}
 
-	// Sandbox HOME and XDG_CONFIG_HOME
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
-	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-
-	// Create a dummy source skill directory
 	srcDir := filepath.Join(tmpDir, "my-source-skill")
 	writeDummySkill(t, srcDir, "no-agent-skill")
 
-	// Call AddSkill in copy/global mode
 	opts := AddOptions{
 		Copy:   true,
 		Global: true,
-		Yes:    true, // skip interactive check/prompts
+		Yes:    true,
 	}
 
-	// Capture stdout to verify the onboarding tip is outputted
 	oldStdout := os.Stdout
 	r, w, pipeErr := os.Pipe()
 	if pipeErr != nil {
@@ -204,7 +265,6 @@ func TestIntegration_NoAgents(t *testing.T) {
 		t.Errorf("expected onboarding tip in stdout, but got %q", output)
 	}
 
-	// Verify the skill was installed in the default mock agent (antigravity) global directory (canonical global skills dir)
 	destMd := filepath.Join(tmpDir, ".agents", "skills", "no-agent-skill", "SKILL.md")
 	if _, err := os.Stat(destMd); os.IsNotExist(err) {
 		t.Fatalf("expected skill to be installed in canonical global skills directory, but it is missing. dest: %s", destMd)
@@ -225,26 +285,16 @@ func TestIntegration_SupportForAllAgentsButOne(t *testing.T) {
 	_ = os.MkdirAll(configHome, 0755)
 	_ = os.MkdirAll(cwd, 0755)
 
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_CONFIG_HOME", configHome)
+	isolateTestHome(t, home, configHome)
 
 	skippedAgent := AgentType("aider-desk")
-	nonParameterizedAgents := map[AgentType]bool{
-		"claude-code":  true,
-		"codex":        true,
-		"mistral-vibe": true,
-		"universal":    true,
-	}
 
-	// Create marker paths for all agents except aider-desk and non-parameterized ones
 	for agentType := range Agents {
-		if agentType != skippedAgent && !nonParameterizedAgents[agentType] {
+		if agentType != skippedAgent && agentType != AgentUniversal {
 			createAgentMarker(t, agentType, home, configHome, cwd)
 		}
 	}
 
-	// Verify detection
 	detected := detectInstalledAgents(home, configHome, cwd)
 	detectedMap := make(map[AgentType]bool)
 	for _, a := range detected {
@@ -255,25 +305,15 @@ func TestIntegration_SupportForAllAgentsButOne(t *testing.T) {
 		t.Errorf("expected aider-desk to be missing from detected list, but it was found")
 	}
 
-	// Verify that at least a significant number of parameterized agents are detected
-	expectedDetectedList := []AgentType{
-		"amp", "antigravity", "augment", "bob", "openclaw", "cline",
-		"codearts-agent", "codebuddy", "codemaker", "codestudio", "command-code",
-		"continue", "cortex", "crush", "cursor", "deepagents", "devin", "dexto",
-		"droid", "firebender", "forgecode", "gemini-cli", "github-copilot", "goose",
-		"hermes-agent", "junie", "iflow-cli", "kilo", "kimi-cli", "kiro-cli", "kode",
-		"mcpjam", "mux", "opencode", "openhands", "pi", "qoder", "qwen-code", "replit",
-		"rovodev", "roo", "tabnine-cli", "trae", "trae-cn", "warp", "windsurf", "zed",
-		"zencoder", "neovate", "pochi", "adal",
-	}
-
-	for _, expectedAgent := range expectedDetectedList {
+	for _, expectedAgent := range AllAgentTypes {
+		if expectedAgent == skippedAgent || expectedAgent == AgentUniversal {
+			continue
+		}
 		if !detectedMap[expectedAgent] {
 			t.Errorf("expected agent %q to be detected, but it was missing", expectedAgent)
 		}
 	}
 
-	// Run AddSkill integration flow
 	srcDir := filepath.Join(tmpDir, "my-skill")
 	writeDummySkill(t, srcDir, "all-but-one-skill")
 
@@ -286,7 +326,6 @@ func TestIntegration_SupportForAllAgentsButOne(t *testing.T) {
 		t.Fatalf("AddSkill failed: %v", err)
 	}
 
-	// Since multiple agents are installed, it falls back to universal (.agents/skills)
 	destMd := filepath.Join(cwd, ".agents", "skills", "all-but-one-skill", "SKILL.md")
 	if _, err := os.Stat(destMd); os.IsNotExist(err) {
 		t.Fatalf("expected skill to be installed under universal path: %s", destMd)
@@ -308,32 +347,27 @@ func TestIntegration_ExactlyOneAgentInstalled(t *testing.T) {
 		_ = os.MkdirAll(configHome, 0755)
 		_ = os.MkdirAll(cwd, 0755)
 
-		t.Setenv("HOME", home)
-		t.Setenv("USERPROFILE", home)
-		t.Setenv("XDG_CONFIG_HOME", configHome)
+		isolateTestHome(t, home, configHome)
+		fresh := Agents
 
-		// Mock Agents map to only look at antigravity, universal, and roo
 		Agents = make(map[AgentType]AgentConfig)
-		Agents["antigravity"] = origAgents["antigravity"]
-		Agents["universal"] = origAgents["universal"]
-		Agents["roo"] = origAgents["roo"]
+		Agents["antigravity"] = fresh["antigravity"]
+		Agents["universal"] = fresh["universal"]
+		Agents["roo"] = fresh["roo"]
 
-		// Create Roo Code marker in both home and cwd
 		createAgentMarker(t, "roo", home, configHome, cwd)
 		_ = os.MkdirAll(filepath.Join(cwd, ".roo"), 0755)
 
-		// Verify detection only detects roo
 		detected := detectInstalledAgents(home, configHome, cwd)
 		if len(detected) != 1 || detected[0] != "roo" {
 			t.Fatalf("expected only 'roo' to be detected, got %v", detected)
 		}
 
-		// Add skill
 		srcDir := filepath.Join(tmpDir, "my-roo-skill")
 		writeDummySkill(t, srcDir, "roo-skill")
 
 		opts := AddOptions{
-			Copy: false, // Symlink mode
+			Copy: false,
 			Yes:  true,
 		}
 		err := AddSkill(srcDir, opts, cwd)
@@ -341,7 +375,6 @@ func TestIntegration_ExactlyOneAgentInstalled(t *testing.T) {
 			t.Fatalf("AddSkill failed: %v", err)
 		}
 
-		// Verify that roo's skills directory has a symlink pointing to the canonical path
 		rooSkillLink := filepath.Join(cwd, ".roo", "skills", "roo-skill")
 		stat, err := os.Lstat(rooSkillLink)
 		if err != nil {
@@ -366,14 +399,10 @@ func TestIntegration_ExactlyOneAgentInstalled(t *testing.T) {
 		_ = os.MkdirAll(configHome, 0755)
 		_ = os.MkdirAll(cwd, 0755)
 
-		t.Setenv("HOME", home)
-		t.Setenv("USERPROFILE", home)
-		t.Setenv("XDG_CONFIG_HOME", configHome)
+		isolateTestHome(t, home, configHome)
 
-		// Create .gemini/antigravity, which triggers both gemini-cli (due to .gemini) and antigravity
 		_ = os.MkdirAll(filepath.Join(home, ".gemini", "antigravity"), 0755)
 
-		// Add skill
 		srcDir := filepath.Join(tmpDir, "shared-path-skill")
 		writeDummySkill(t, srcDir, "shared-skill")
 
@@ -386,7 +415,6 @@ func TestIntegration_ExactlyOneAgentInstalled(t *testing.T) {
 			t.Fatalf("AddSkill failed: %v", err)
 		}
 
-		// Verify it resolves to antigravity (which defaults to installing to global canonical skills dir in copy mode)
 		destMd := filepath.Join(cwd, ".agents", "skills", "shared-skill", "SKILL.md")
 		if _, err := os.Stat(destMd); os.IsNotExist(err) {
 			t.Fatalf("expected skill to be installed at %s", destMd)
@@ -394,8 +422,8 @@ func TestIntegration_ExactlyOneAgentInstalled(t *testing.T) {
 	})
 }
 
-// 4. support for non-parameterized agents
-func TestIntegration_SupportForNonParameterizedAgents(t *testing.T) {
+// 4. support for env-override agents dynamically resolved without init-time freezing
+func TestIntegration_SupportForDynamicEnvAgents(t *testing.T) {
 	origAgents := Agents
 	defer func() { Agents = origAgents }()
 
@@ -403,69 +431,45 @@ func TestIntegration_SupportForNonParameterizedAgents(t *testing.T) {
 	home := filepath.Join(tmpDir, "home")
 	configHome := filepath.Join(tmpDir, "config")
 	cwd := filepath.Join(tmpDir, "cwd")
+	customClaude := filepath.Join(tmpDir, "custom-claude")
 
 	_ = os.MkdirAll(home, 0755)
 	_ = os.MkdirAll(configHome, 0755)
 	_ = os.MkdirAll(cwd, 0755)
-
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_CONFIG_HOME", configHome)
-
-	// Mock Agents map
-	Agents = make(map[AgentType]AgentConfig)
-	
-	// Define a mock claude-code (non-parameterized agent) with DetectInstalled checking our sandbox
-	Agents["claude-code"] = AgentConfig{
-		Name:            "claude-code",
-		DisplayName:     "Claude Code",
-		SkillsDir:       ".claude/skills",
-		GlobalSkillsDir: filepath.Join(home, ".claude", "skills"),
-		DetectInstalled: func(h, c, w string) bool {
-			_, err := os.Stat(filepath.Join(h, ".claude"))
-			return err == nil
-		},
-	}
-	Agents["antigravity"] = AgentConfig{
-		Name:            "antigravity",
-		DisplayName:     "Antigravity",
-		SkillsDir:       ".agents/skills",
-		DetectInstalled: func(h, c, w string) bool {
-			return false
-		},
-	}
-
-	// Create marker path for claude-code in both home and cwd
-	_ = os.MkdirAll(filepath.Join(home, ".claude"), 0755)
+	_ = os.MkdirAll(customClaude, 0755)
 	_ = os.MkdirAll(filepath.Join(cwd, ".claude"), 0755)
 
-	// Verify detection
+	isolateTestHome(t, home, configHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", customClaude)
+	RefreshAgents()
+	fresh := Agents
+
+	Agents = make(map[AgentType]AgentConfig)
+	Agents["claude-code"] = fresh["claude-code"]
+	Agents["antigravity"] = fresh["antigravity"]
+
 	detected := detectInstalledAgents(home, configHome, cwd)
 	if len(detected) != 1 || detected[0] != "claude-code" {
-		t.Fatalf("expected claude-code to be detected, got %v", detected)
+		t.Fatalf("expected claude-code to be detected via dynamic CLAUDE_CONFIG_DIR, got %v", detected)
 	}
 
-	// Run AddSkill integration flow
 	srcDir := filepath.Join(tmpDir, "my-claude-skill")
 	writeDummySkill(t, srcDir, "claude-skill")
 
 	opts := AddOptions{
-		Copy:   false, // symlink mode
+		Copy:   false,
 		Global: false,
 		Yes:    true,
 	}
-	err := AddSkill(srcDir, opts, cwd)
-	if err != nil {
+	if err := AddSkill(srcDir, opts, cwd); err != nil {
 		t.Fatalf("AddSkill failed: %v", err)
 	}
 
-	// Verify that it is symlinked under claude-code's skills directory
 	claudeSkillLink := filepath.Join(cwd, ".claude", "skills", "claude-skill")
 	stat, err := os.Lstat(claudeSkillLink)
 	if err != nil {
 		t.Fatalf("failed to locate claude skill link: %v", err)
 	}
-
 	if stat.Mode()&os.ModeSymlink == 0 {
 		t.Errorf("expected claude skill path to be a symlink, got mode: %v", stat.Mode())
 	}
