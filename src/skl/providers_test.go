@@ -2053,3 +2053,26 @@ func TestDiscoverSkillsIgnoresEscapingSkillMdSymlink(t *testing.T) {
 		t.Fatalf("skills = %+v; want only the confined symlink skill", skills)
 	}
 }
+
+// Review #65 item 3: plugin names from marketplace.json and plugin.json are
+// shown as group headers and must be stripped of terminal escapes.
+func TestGetPluginGroupingsSanitizesNames(t *testing.T) {
+	provIsolate(t)
+	root := t.TempDir()
+	provWriteFile(t, filepath.Join(root, ".claude-plugin", "marketplace.json"),
+		`{"plugins": [{"name": "rev\u001b[31miewer\u001b]0;pwned\u0007", "source": "./", "skills": ["./skills/a"]},
+		{"name": "\u001b[2J", "source": "./", "skills": ["./skills/c"]}]}`)
+	provWriteFile(t, filepath.Join(root, ".claude-plugin", "plugin.json"), `{"name": "so\u001b[1mlo\r\nx", "skills": ["./skills/b"]}`)
+	abs := func(rel string) string {
+		p, err := filepath.Abs(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Clean(p)
+	}
+	got := GetPluginGroupings(root)
+	want := map[string]string{abs("skills/a"): "reviewer", abs("skills/b"): "solo x"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("groupings = %q, want %q", got, want)
+	}
+}

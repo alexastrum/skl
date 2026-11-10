@@ -19,6 +19,9 @@ import (
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"golang.org/x/text/collate"
+	"golang.org/x/text/language"
 )
 
 // ErrInvalidLocalLock is returned when skills-lock.json exists on disk but is malformed,
@@ -659,7 +662,7 @@ func FrozenLockfileError(changes []string) error {
 
 // ComputeSkillFolderHash computes a SHA-256 hash from all regular files in a skill directory,
 // matching computeSkillFolderHash in upstream src/local-lock.ts: files are ordered with
-// relativePath.localeCompare (ICU collation, see jsLocaleCompare), not byte order.
+// relativePath.localeCompare (ICU collation, see newLocaleCollator), not byte order.
 func ComputeSkillFolderHash(skillDir string) (string, error) {
 	var files []struct {
 		relPath string
@@ -697,11 +700,9 @@ func ComputeSkillFolderHash(skillDir string) (string, error) {
 		return "", err
 	}
 
+	coll := newLocaleCollator()
 	sort.SliceStable(files, func(i, j int) bool {
-		if c := jsLocaleCompare(files[i].relPath, files[j].relPath); c != 0 {
-			return c < 0
-		}
-		return files[i].relPath < files[j].relPath
+		return localePathCompare(coll, files[i].relPath, files[j].relPath) < 0
 	})
 
 	h := sha256.New()
@@ -976,87 +977,23 @@ func GetGitRepoTreeHash(repoDir, skillPath string) string {
 
 // --- JavaScript-compatible collation (String.prototype.localeCompare) ---
 
-// icuRootASCIIOrder lists every non-ignorable ASCII character in ICU root collation order
-// (CLDR root, tertiary strength, alternate=non-ignorable), the order Node's default
-// localeCompare uses. Each uppercase letter shares the primary weight of the lowercase letter
-// before it and differs only at the tertiary level (lowercase first). The other C0 controls
-// and DEL are completely ignorable.
-const icuRootASCIIOrder = "\t\n\v\f\r _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789" +
-	"aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ"
-
-var icuASCIIPrimary, icuASCIITertiary [utf8.RuneSelf]uint16
-
-func init() {
-	var p uint16
-	for i := 0; i < len(icuRootASCIIOrder); i++ {
-		c := icuRootASCIIOrder[i]
-		if c >= 'A' && c <= 'Z' {
-			icuASCIIPrimary[c] = p
-			icuASCIITertiary[c] = 1
-			continue
-		}
-		p++
-		icuASCIIPrimary[c] = p
-	}
+// newLocaleCollator returns a collator that approximates Node's default
+// String.prototype.localeCompare: CLDR root collation, tertiary strength, punctuation and
+// whitespace not ignorable. The golang.org/x/text tables (Unicode 6.2, CLDR 23) are older than
+// Node's ICU data, so characters added or reordered since then can sort differently (see the
+// known approximations in AGENTS.md). A Collator is not safe for concurrent use, so callers
+// create one per sort.
+func newLocaleCollator() *collate.Collator {
+	return collate.New(language.Und)
 }
 
-// collationWeights returns the primary and tertiary weights of r; ok is false when r is
-// completely ignorable. Non-ASCII runes sort after all ASCII letters, by code point.
-func collationWeights(r rune) (primary uint32, tertiary uint16, ok bool) {
-	if r >= 0 && r < utf8.RuneSelf {
-		p := icuASCIIPrimary[r]
-		return uint32(p), icuASCIITertiary[r], p != 0
+// localePathCompare orders paths with c and breaks collation ties (strings Node also treats
+// as equal, such as NFC and NFD spellings) by byte order, so the result is deterministic.
+func localePathCompare(c *collate.Collator, a, b string) int {
+	if r := c.CompareString(a, b); r != 0 {
+		return r
 	}
-	return 0x100 + uint32(r), 0, true
-}
-
-// nextCollationWeight advances *pos past ignorable runes in s and returns the weight of the
-// next non-ignorable rune at the given level (0 = primary, 1 = tertiary).
-func nextCollationWeight(s string, pos *int, level int) (uint32, bool) {
-	for *pos < len(s) {
-		r, n := utf8.DecodeRuneInString(s[*pos:])
-		*pos += n
-		p, t, ok := collationWeights(r)
-		if !ok {
-			continue
-		}
-		if level == 1 {
-			return uint32(t), true
-		}
-		return p, true
-	}
-	return 0, false
-}
-
-// jsLocaleCompare returns the sign of JavaScript's a.localeCompare(b) under Node's default
-// (en / ICU root) collator. It compares all primary weights first, then tertiary (case)
-// weights. It is exact for ASCII strings, which covers skill file paths in practice; non-ASCII
-// runes use a deterministic code-point fallback instead of full ICU data, keeping skl free of
-// extra module dependencies. Strings that differ only in ignorable controls compare equal.
-func jsLocaleCompare(a, b string) int {
-	for level := 0; level < 2; level++ {
-		i, j := 0, 0
-		for {
-			wa, oka := nextCollationWeight(a, &i, level)
-			wb, okb := nextCollationWeight(b, &j, level)
-			if !oka || !okb {
-				if oka {
-					return 1
-				}
-				if okb {
-					return -1
-				}
-				break
-			}
-			if wa != wb {
-				if wa < wb {
-					return -1
-				}
-				return 1
-			}
-		}
-	}
-	return 0
+	return strings.Compare(a, b)
 }
 
 // decodeUTF8WHATWG decodes b like Node's buffer.toString('utf8'): each maximal subpart of an

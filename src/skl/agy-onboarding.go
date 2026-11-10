@@ -1,11 +1,9 @@
 package skl
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
-	"strings"
 )
 
 // EnableAgyOnboarding controls whether the CLI prompts/recommends installing agy-cli
@@ -19,21 +17,21 @@ const agyTip = "💡 No active AI agents detected. We highly recommend installin
 // maybeSuggestAgy handles displaying premium onboarding recommendations or prompting
 // the user to install agy-cli when no active AI agents are present.
 func maybeSuggestAgy(opts AddOptions) {
-	maybeSuggestAgyTo(os.Stdout, bufio.NewReader(os.Stdin), opts, isInteractive())
+	interactive := isInteractive()
+	maybeSuggestAgyTo(os.Stdout, newPromptTerm(os.Stdin, os.Stdout, interactive), opts, interactive)
 }
 
 // maybeSuggestAgyTo writes the agy-cli onboarding prompt (interactive, without --yes) or
 // tip to w. --json runs never call it, so stdout stays a single JSON value.
-func maybeSuggestAgyTo(w io.Writer, in *bufio.Reader, opts AddOptions, interactive bool) {
+func maybeSuggestAgyTo(w io.Writer, t *promptTerm, opts AddOptions, interactive bool) {
 	if !EnableAgyOnboarding || opts.JSON {
 		return
 	}
 
 	if !opts.Yes && interactive {
-		fmt.Fprintf(w, "💡 No active AI agents detected on your system.\n❓ Would you like to get agy-cli (the premium Antigravity agent CLI)? [Y/n]: ")
-		response, _ := in.ReadString('\n')
-		response = strings.TrimSpace(strings.ToLower(response))
-		if response == "" || response == "y" || response == "yes" {
+		fmt.Fprintln(w, "💡 No active AI agents detected on your system.")
+		yes, err := t.Confirm(ConfirmOptions{Message: "Would you like to get agy-cli (the premium Antigravity agent CLI)?"})
+		if err == nil && yes {
 			fmt.Fprintln(w, "\n🚀 Excellent choice! To get agy-cli, run:")
 			fmt.Fprintln(w, "   curl -fsSL https://antigravity.google/cli/install.sh | bash")
 			fmt.Fprintln(w, "   Or visit: https://antigravity.google/docs/cli-overview for documentation.")

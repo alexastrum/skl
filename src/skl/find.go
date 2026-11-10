@@ -1,7 +1,6 @@
 package skl
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -273,7 +273,7 @@ func runFind(args []string, cwd string, stdout, stderr io.Writer, stdin io.Reade
 		return 0
 	}
 
-	selected := runSearchPrompt(bufio.NewReader(stdin), stdout, opts.Owner)
+	selected := runSearchPrompt(newPromptTerm(stdin, stdout, true), opts.Owner)
 	if selected == nil {
 		fmt.Fprintf(stdout, "%sSearch cancelled%s\n\n", ansiDim, ansiReset)
 		return 0
@@ -311,48 +311,165 @@ func printFoundSkill(w io.Writer, s FoundSkill) {
 	fmt.Fprintf(w, "%s└ https://skills.sh/%s%s\n\n", ansiDim, s.Slug, ansiReset)
 }
 
-// runSearchPrompt is a portable, line-based search prompt: the user types a query
-// (at least 2 characters), sees up to 8 results, and picks one by number. An empty
-// line or EOF cancels.
-func runSearchPrompt(in *bufio.Reader, out io.Writer, owner string) *FoundSkill {
-	const maxVisible = 8
-	for {
-		q, ok := promptLine(in, out, "Search skills (empty to cancel): ")
-		if !ok || q == "" {
-			return nil
-		}
-		if len(q) < 2 {
-			fmt.Fprintf(out, "%sStart typing to search (min 2 chars)%s\n", ansiDim, ansiReset)
-			continue
-		}
-		results, _ := SearchSkillsAPI(q, owner)
-		if len(results) == 0 {
-			fmt.Fprintf(out, "%sNo skills found%s\n", ansiDim, ansiReset)
-			continue
-		}
-		if len(results) > maxVisible {
-			results = results[:maxVisible]
-		}
-		for i, s := range results {
-			badge := ""
-			if inst := formatInstalls(s.Installs); inst != "" {
-				badge = " " + ansiCyan + inst + ansiReset
+// findSearchFn and findDebounce are overridable in tests.
+var (
+	findSearchFn = SearchSkillsAPI
+	// findDebounce is upstream's adaptive debounce: 250ms for 2 characters,
+	// 50ms less per extra character, never under 150ms.
+	findDebounce = func(q string) time.Duration {
+		return time.Duration(max(150, 350-len([]rune(q))*50)) * time.Millisecond
+	}
+)
+
+// runSearchPrompt is upstream's fzf-style search prompt: typing searches the
+// skills.sh API (debounced, at least 2 characters) while up/down move through
+// the first 8 results, Enter picks one, and Esc or Ctrl+C cancels (nil).
+func runSearchPrompt(t *promptTerm, owner string) *FoundSkill {
+	end, err := t.begin()
+	if err != nil {
+		return nil
+	}
+	defer end()
+	// Read the overridable hooks once so timer goroutines never touch the
+	// package globals, which tests restore when they finish.
+	searchFn, debounceFn := findSearchFn, findDebounce
+
+	var (
+		mu       sync.Mutex
+		results  []FoundSkill
+		selected int
+		query    []rune
+		loading  bool
+		gen      int
+		timer    *time.Timer
+		closed   bool
+	)
+	frame := &promptFrame{t: t}
+	// render must be called with mu held.
+	render := func() {
+		lines := []string{ansiText + "Search skills:" + ansiReset + " " + string(query) + ansiBold + "_" + ansiReset, ""}
+		const maxVisible = 8
+		switch {
+		case len(query) < 2:
+			lines = append(lines, ansiDim+"Start typing to search (min 2 chars)"+ansiReset)
+		case len(results) == 0 && loading:
+			lines = append(lines, ansiDim+"Searching"+t.sym().ellipsis+ansiReset)
+		case len(results) == 0:
+			lines = append(lines, ansiDim+"No skills found"+ansiReset)
+		default:
+			for i, s := range results {
+				if i >= maxVisible {
+					break
+				}
+				arrow, name := " ", ansiText+s.Name+ansiReset
+				if i == selected {
+					arrow, name = ansiBold+">"+ansiReset, ansiBold+s.Name+ansiReset
+				}
+				source := ""
+				if s.Source != "" {
+					source = " " + ansiDim + s.Source + ansiReset
+				}
+				badge := ""
+				if inst := formatInstalls(s.Installs); inst != "" {
+					badge = " " + ansiCyan + inst + ansiReset
+				}
+				spin := ""
+				if loading && i == 0 {
+					spin = " " + ansiDim + t.sym().ellipsis + ansiReset
+				}
+				lines = append(lines, "  "+arrow+" "+name+source+badge+spin)
 			}
-			fmt.Fprintf(out, "  %d) %s %s(%s)%s%s\n", i+1, s.Name, ansiDim, s.Source, ansiReset, badge)
 		}
-		pick, ok := promptLine(in, out, "Select a skill number (empty to search again): ")
-		if !ok {
+		lines = append(lines, "", ansiDim+"up/down navigate | enter select | esc cancel"+ansiReset)
+		frame.draw(lines)
+	}
+	// trigger must be called with mu held.
+	trigger := func() {
+		if timer != nil {
+			timer.Stop()
+			timer = nil
+		}
+		gen++
+		loading = false
+		if len(query) < 2 {
+			results, selected = nil, 0
+			render()
+			return
+		}
+		loading = true
+		render()
+		q, mine := string(query), gen
+		timer = time.AfterFunc(debounceFn(q), func() {
+			mu.Lock()
+			stale := closed || mine != gen
+			mu.Unlock()
+			if stale {
+				return
+			}
+			res, err := searchFn(q, owner)
+			mu.Lock()
+			defer mu.Unlock()
+			if closed || mine != gen {
+				return
+			}
+			if err != nil {
+				res = nil
+			}
+			results, selected, loading, timer = res, 0, false, nil
+			render()
+		})
+	}
+
+	// On Enter or cancel, mark the prompt closed and stop a pending debounce
+	// so no search runs after the prompt returns.
+	defer func() {
+		mu.Lock()
+		closed = true
+		if timer != nil {
+			timer.Stop()
+			timer = nil
+		}
+		mu.Unlock()
+	}()
+	mu.Lock()
+	render()
+	mu.Unlock()
+	for {
+		k := t.keys().next()
+		mu.Lock()
+		switch {
+		case k.isCancel():
+			closed = true
+			mu.Unlock()
 			return nil
+		case k.kind == keyEnter:
+			closed = true
+			var pick *FoundSkill
+			if selected < len(results) {
+				s := results[selected]
+				pick = &s
+			}
+			mu.Unlock()
+			return pick
+		case k.kind == keyUp:
+			selected = max(0, selected-1)
+			render()
+		case k.kind == keyDown:
+			selected = min(max(0, len(results)-1), selected+1)
+			render()
+		case k.kind == keyBackspace:
+			if len(query) > 0 {
+				query = query[:len(query)-1]
+				trigger()
+			}
+		case k.kind == keyRune && k.r >= ' ' && k.r <= '~', k.kind == keySpace:
+			r := k.r
+			if k.kind == keySpace {
+				r = ' '
+			}
+			query = append(query, r)
+			trigger()
 		}
-		if pick == "" {
-			continue
-		}
-		n, err := strconv.Atoi(pick)
-		if err != nil || n < 1 || n > len(results) {
-			fmt.Fprintf(out, "Invalid selection: %q\n", pick)
-			continue
-		}
-		sel := results[n-1]
-		return &sel
+		mu.Unlock()
 	}
 }

@@ -1,14 +1,12 @@
 package skl
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 )
 
@@ -93,6 +91,8 @@ type UpdateCheckOptions struct {
 	ReportOutdated func(name string)
 	Stdout         io.Writer
 	Stdin          io.Reader
+
+	term *promptTerm
 }
 
 func (o *UpdateCheckOptions) out() io.Writer {
@@ -109,16 +109,15 @@ func (o *UpdateCheckOptions) cwd() string {
 	return o.Cwd
 }
 
-func (o *UpdateCheckOptions) reader() *bufio.Reader {
-	if o.Stdin == nil {
-		o.Stdin = os.Stdin
+// prompter returns the terminal update prompts share, reading keys from Stdin.
+func (o *UpdateCheckOptions) prompter() *promptTerm {
+	if o.term == nil {
+		if o.Stdin == nil {
+			o.Stdin = os.Stdin
+		}
+		o.term = newPromptTerm(o.Stdin, o.out(), stdinIsTTY())
 	}
-	if br, ok := o.Stdin.(*bufio.Reader); ok {
-		return br
-	}
-	br := bufio.NewReader(o.Stdin)
-	o.Stdin = br
-	return br
+	return o.term
 }
 
 // updateFetch materializes a source for update checks (overridable in tests).
@@ -191,28 +190,22 @@ func ResolveUpdateScope(opts *UpdateCheckOptions) (UpdateScope, bool) {
 	case opts.Project:
 		return UpdateScopeProject, true
 	}
-	if opts.Yes || !stdinIsTTY() || IsRunningInAgent() {
+	if opts.Yes || !stdinIsTTY() {
 		if HasProjectSkills(opts.cwd()) {
 			return UpdateScopeProject, true
 		}
 		return UpdateScopeGlobal, true
 	}
-	w := opts.out()
-	fmt.Fprintln(w, "Update scope:")
-	fmt.Fprintln(w, "  1) Project (Update skills in current directory)")
-	fmt.Fprintln(w, "  2) Global (Update skills in home directory)")
-	fmt.Fprintln(w, "  3) Both (Update all skills)")
-	ans, ok := promptLine(opts.reader(), w, "Selection (1-3): ")
-	switch {
-	case ok && ans == "1":
-		return UpdateScopeProject, true
-	case ok && ans == "2":
-		return UpdateScopeGlobal, true
-	case ok && ans == "3":
-		return UpdateScopeBoth, true
+	scope, err := opts.prompter().Select(SelectOptions{Message: "Update scope", Options: []PromptOption{
+		{Value: string(UpdateScopeProject), Label: "Project", Hint: "Update skills in current directory"},
+		{Value: string(UpdateScopeGlobal), Label: "Global", Hint: "Update skills in home directory"},
+		{Value: string(UpdateScopeBoth), Label: "Both", Hint: "Update all skills"},
+	}})
+	if err != nil {
+		fmt.Fprintln(opts.out(), "Cancelled")
+		return "", false
 	}
-	fmt.Fprintln(w, "Cancelled")
-	return "", false
+	return UpdateScope(scope), true
 }
 
 // WithGlobalSkillsDir drops agents without a global skills dir from a global
@@ -315,6 +308,35 @@ func installedSkillNames(global bool, cwd string) map[string]bool {
 	return out
 }
 
+// printFetching announces how many sources a check is about to fetch.
+func printFetching(w io.Writer, n int) {
+	if n == 0 {
+		return
+	}
+	plural := "s"
+	if n == 1 {
+		plural = ""
+	}
+	fmt.Fprintf(w, "%sFetching %d source%s...%s\n", ansiDim, n, plural, ansiReset)
+}
+
+// printCheckingSource prints the per-source progress line. Like upstream it
+// returns to column 0 and clears the rest of the line.
+func printCheckingSource(w io.Writer, source string) {
+	fmt.Fprintf(w, "\r%sChecking skills from source: %s%s\x1b[K\n", ansiDim, source, ansiReset)
+}
+
+// fetchAllForUpdate runs updateFetch over reqs with at most FetchConcurrency()
+// in flight (upstream mapConcurrent / fetchSources). Results keep input order.
+func fetchAllForUpdate(reqs []SourceRequest) ([]*FetchedSource, []error) {
+	out := make([]*FetchedSource, len(reqs))
+	errs := make([]error, len(reqs))
+	fpMapConcurrent(len(reqs), FetchConcurrency(), func(i int) {
+		out[i], errs[i] = updateFetch(reqs[i])
+	})
+	return out, errs
+}
+
 // reinstallSkill installs skill where `add -y` would put it, keeping the recorded
 // install mode (#2607) and Eve subagents. It returns per-target failures and
 // whether at least one target took the skill.
@@ -357,6 +379,30 @@ func reinstallSkill(skill Skill, global bool, cwd, installMode string, subagents
 	return ok, failed
 }
 
+// installFetched installs the skills named name from a fetched source (upstream
+// installFetched): the fetch error when the fetch failed, "No matching skills
+// found" when nothing matches, else the skills at least one target took and
+// the per-target failures.
+func installFetched(f *FetchedSource, fetchErr error, name string, global bool, cwd, installMode string, subagents []string) (installed []FetchedSkill, failed []string, errMsg string) {
+	if fetchErr != nil || f == nil {
+		return nil, nil, errText(fetchErr)
+	}
+	selected := FilterFetchedSkills(f.Skills, []string{name})
+	if len(selected) == 0 {
+		return nil, nil, "No matching skills found"
+	}
+	for _, s := range selected {
+		ok, fl := reinstallSkill(s.Skill, global, cwd, installMode, subagents)
+		for _, x := range fl {
+			failed = append(failed, GetSkillDisplayName(s.Skill)+" → "+x)
+		}
+		if ok {
+			installed = append(installed, s)
+		}
+	}
+	return installed, failed, ""
+}
+
 func reportInstall(w io.Writer, name string, ok bool, failed []string, errMsg string) bool {
 	safe := SanitizeMetadata(name)
 	for _, f := range failed {
@@ -374,6 +420,34 @@ func reportInstall(w io.Writer, name string, ok bool, failed []string, errMsg st
 	return false
 }
 
+// promptDeletions warns about skills deleted upstream and, when interactive,
+// offers to remove their local copies.
+func promptDeletions(opts *UpdateCheckOptions, source string, deleted []string, global bool) {
+	if len(deleted) == 0 {
+		return
+	}
+	w := opts.out()
+	// source and the names come from a lock file that may be untrusted, so
+	// they are sanitized for display only.
+	fmt.Fprintf(w, "\n%sWarning:%s The following skills from %s%s%s appear to have been deleted upstream:\n", ansiDim, ansiReset, ansiDim, SanitizeMetadata(source), ansiReset)
+	for _, s := range deleted {
+		fmt.Fprintf(w, "  %s•%s %s\n", ansiDim, ansiReset, SanitizeMetadata(s))
+	}
+	if opts.Yes || !stdinIsTTY() {
+		fmt.Fprintf(w, "%sSkipping deletion in non-interactive mode.%s\n", ansiDim, ansiReset)
+		return
+	}
+	confirmed, err := opts.prompter().Confirm(ConfirmOptions{Message: "Would you like to remove the local copies of these deleted skills?"})
+	if err == nil && confirmed {
+		for _, s := range deleted {
+			fmt.Fprintf(w, "%sRemoving%s %s...\n", ansiDim, ansiReset, SanitizeMetadata(s))
+			if err := RemoveSkills([]string{s}, RemoveOptions{Yes: true, Global: global}, opts.cwd()); err != nil {
+				fmt.Fprintf(w, "  %s✗ %s%s\n", ansiDim, FormatError(err), ansiReset)
+			}
+		}
+	}
+}
+
 // checkAndPromptForDeletions resolves locked skills against a fresh checkout,
 // warns about ambiguous matches and offers to remove skills deleted upstream.
 func checkAndPromptForDeletions(opts *UpdateCheckOptions, source string, lockedNames []string, lockedPaths map[string]string, global bool, discovered []DiscoveredSkillLocation, exact bool) SkillLocationResolution {
@@ -385,26 +459,7 @@ func checkAndPromptForDeletions(opts *UpdateCheckOptions, source string, lockedN
 			fmt.Fprintf(w, "  %s•%s %s\n", ansiDim, ansiReset, SanitizeMetadata(n))
 		}
 	}
-	if len(res.DeletedSkills) == 0 {
-		return res
-	}
-	fmt.Fprintf(w, "\n%sWarning:%s The following skills from %s%s%s appear to have been deleted upstream:\n", ansiDim, ansiReset, ansiDim, source, ansiReset)
-	for _, s := range res.DeletedSkills {
-		fmt.Fprintf(w, "  %s•%s %s\n", ansiDim, ansiReset, s)
-	}
-	if opts.Yes || !stdinIsTTY() {
-		fmt.Fprintf(w, "%sSkipping deletion in non-interactive mode.%s\n", ansiDim, ansiReset)
-		return res
-	}
-	ans, ok := promptLine(opts.reader(), w, "Would you like to remove the local copies of these deleted skills? (y/N) ")
-	if ok && (strings.EqualFold(ans, "y") || strings.EqualFold(ans, "yes")) {
-		for _, s := range res.DeletedSkills {
-			fmt.Fprintf(w, "%sRemoving%s %s...\n", ansiDim, ansiReset, s)
-			if err := RemoveSkills([]string{s}, RemoveOptions{Yes: true, Global: global}, opts.cwd()); err != nil {
-				fmt.Fprintf(w, "  %s✗ %s%s\n", ansiDim, FormatError(err), ansiReset)
-			}
-		}
-	}
+	promptDeletions(opts, source, res.DeletedSkills, global)
 	return res
 }
 
@@ -447,16 +502,23 @@ func processDownloadUpdates(opts *UpdateCheckOptions, items []downloadItem, glob
 		}
 		byURL[it.url] = append(byURL[it.url], it)
 	}
-	onDisk := installedSkillNames(global, cwd)
-	for _, u := range urls {
+	reqs := make([]SourceRequest, len(urls))
+	for i, u := range urls {
 		group := byURL[u]
-		fmt.Fprintf(w, "%sChecking skills from source: %s%s\n", ansiDim, u, ansiReset)
 		names := make([]string, len(group))
-		for i, it := range group {
-			names[i] = it.name
+		for j, it := range group {
+			names[j] = it.name
 		}
-		fetched, err := updateFetch(SourceRequest{Source: u, Parsed: &ParsedSource{Type: "download", URL: u}, Skills: names, FullDepth: true, Yes: true, Cwd: cwd})
+		reqs[i] = SourceRequest{Source: u, Parsed: &ParsedSource{Type: "download", URL: u}, Skills: names, FullDepth: true, Yes: true, Cwd: cwd}
+	}
+	fetchedAll, errs := fetchAllForUpdate(reqs)
+	onDisk := installedSkillNames(global, cwd)
+	for i, u := range urls {
+		group := byURL[u]
+		fetched, err := fetchedAll[i], errs[i]
+		printCheckingSource(w, u)
 		if err != nil || fetched == nil {
+			_ = fetched.Cleanup()
 			fail += len(group)
 			fmt.Fprintf(w, "  %s✗ Failed to check skills from %s: %s%s\n", ansiDim, u, errText(err), ansiReset)
 			continue
@@ -538,94 +600,188 @@ type wellKnownItem struct {
 	subagents    []string
 }
 
-// processWellKnownUpdates re-reads each well-known index and reinstalls skills
-// whose digest changed. changed is true when anything differs from the lock.
-func processWellKnownUpdates(opts *UpdateCheckOptions, groups map[string][]wellKnownItem, global bool, record func(name string, fs *FetchedSource, s FetchedSkill) error) (success, fail int, changed bool) {
-	w := opts.out()
-	cwd := opts.cwd()
-	bases := make([]string, 0, len(groups))
-	for b := range groups {
-		bases = append(bases, b)
+// wellKnownCheck is the outcome of checkWellKnownForUpdates.
+type wellKnownCheck struct {
+	// status is "error", "current" or "changed".
+	status                      string
+	changed, removed, newSkills []string
+}
+
+// wellKnownUpdateCheckHeaders marks index requests made by update checks.
+var wellKnownUpdateCheckHeaders = map[string]string{"X-Skills-Update-Check": "1"}
+
+// checkWellKnownForUpdates compares locked well-known skills with the source's
+// index. v0.2.0 entries compare the index digest without downloading the
+// skill; v0.1.0 entries are fetched and their content digest compared.
+func checkWellKnownForUpdates(baseURL string, items []wellKnownItem) wellKnownCheck {
+	candidates := fetchWellKnownCandidatesWithHeaders(baseURL, wellKnownUpdateCheckHeaders)
+	if len(candidates) == 0 {
+		return wellKnownCheck{status: "error"}
 	}
-	sort.Strings(bases)
-	for _, base := range bases {
-		items := groups[base]
-		fmt.Fprintf(w, "%sChecking skills from source: %s%s\n", ansiDim, base, ansiReset)
-		fetched, err := updateFetch(SourceRequest{Source: base, Skills: []string{"*"}, Yes: true, Cwd: cwd})
-		if err != nil || fetched == nil {
-			fail += len(items)
-			changed = true
-			fmt.Fprintf(w, "  %s✗ Failed to check skills from %s%s\n", ansiDim, base, ansiReset)
+	entries := candidates[0].entries
+	byName := map[string]wellKnownEntry{}
+	for _, e := range entries {
+		byName[e.name] = e
+	}
+	var res wellKnownCheck
+	local := map[string]bool{}
+	for _, it := range items {
+		local[it.name] = true
+		if _, ok := byName[it.name]; !ok {
+			res.removed = append(res.removed, it.name)
+		}
+	}
+	for _, e := range entries {
+		if !local[e.name] {
+			res.newSkills = append(res.newSkills, e.name)
+		}
+	}
+	var needsContent []wellKnownItem
+	for _, it := range items {
+		e, ok := byName[it.name]
+		if !ok {
 			continue
 		}
-		byName := map[string]FetchedSkill{}
-		for _, s := range fetched.Skills {
-			key := s.InstallName
-			if key == "" {
-				key = s.Name
+		if e.version == "0.2.0" {
+			if it.digest == "" || e.digest != it.digest {
+				res.changed = append(res.changed, it.name)
 			}
-			byName[key] = s
+		} else {
+			needsContent = append(needsContent, it)
 		}
-		local := map[string]bool{}
-		var changedNames []string
-		for _, it := range items {
-			local[it.name] = true
-			s, ok := byName[it.name]
-			if !ok {
-				changed = true
-				fmt.Fprintf(w, "  %s✗ %s is no longer in this index%s\n", ansiDim, SanitizeMetadata(it.name), ansiReset)
-				continue
-			}
-			if it.digest == "" || s.WellKnownDigest != it.digest {
-				changedNames = append(changedNames, it.name)
+	}
+	if len(needsContent) > 0 {
+		tracked := map[string]bool{}
+		for _, it := range needsContent {
+			tracked[it.name] = true
+		}
+		var toFetch []wellKnownEntry
+		for _, e := range entries {
+			if tracked[e.name] {
+				toFetch = append(toFetch, e)
 			}
 		}
-		var newSkills []string
-		for name := range byName {
-			if !local[name] {
-				newSkills = append(newSkills, name)
+		skills := make([]*WellKnownSkill, len(toFetch))
+		fpMapConcurrent(len(toFetch), 8, func(i int) {
+			if s, err := fetchWellKnownEntry(toFetch[i]); err == nil {
+				skills[i] = s
+			}
+		})
+		digests := map[string]string{}
+		fetched := 0
+		for _, s := range skills {
+			if s != nil {
+				fetched++
+				digests[s.InstallName] = ComputeWellKnownSkillDigest(s)
 			}
 		}
-		sort.Strings(newSkills)
-		if len(newSkills) > 0 {
-			flag := ""
-			if global {
-				flag = " -g"
+		if fetched == 0 {
+			return wellKnownCheck{status: "error"}
+		}
+		for _, it := range needsContent {
+			if d, ok := digests[it.name]; !ok || it.digest == "" || d != it.digest {
+				res.changed = append(res.changed, it.name)
 			}
-			fmt.Fprintf(w, "  %sNew skills available from %s: %s (install with skl add %s%s)%s\n", ansiDim, base, strings.Join(newSkills, ", "), base, flag, ansiReset)
 		}
-		if len(changedNames) > 0 {
-			changed = true
+	}
+	if len(res.changed) == 0 && len(res.removed) == 0 {
+		res.status = "current"
+	} else {
+		res.status = "changed"
+	}
+	return res
+}
+
+func printNewSkills(w io.Writer, baseURL string, newSkills []string, global bool) {
+	if len(newSkills) == 0 {
+		return
+	}
+	names := make([]string, len(newSkills))
+	for i, n := range newSkills {
+		names[i] = SanitizeMetadata(n)
+	}
+	flag := ""
+	if global {
+		flag = " -g"
+	}
+	fmt.Fprintf(w, "  %s%d new skill(s) available from this source:%s %s\n", ansiDim, len(newSkills), ansiReset, strings.Join(names, ", "))
+	fmt.Fprintf(w, "    %sTo install: %sskl add %s --skill %s%s%s\n", ansiDim, ansiText, baseURL, strings.Join(names, " "), flag, ansiReset)
+}
+
+// processWellKnownUpdates re-reads each well-known index (bases in lock order)
+// and reinstalls skills whose digest changed. changed is true when a reachable
+// index differs from the lock. record writes the lock entry of each installed
+// skill.
+func processWellKnownUpdates(opts *UpdateCheckOptions, bases []string, groups map[string][]wellKnownItem, global bool, record func(baseURL string, f *FetchedSource, s FetchedSkill) error) (success, fail int, changed bool) {
+	w := opts.out()
+	cwd := opts.cwd()
+	printFetching(w, len(bases))
+	results := make([]wellKnownCheck, len(bases))
+	fpMapConcurrent(len(bases), FetchConcurrency(), func(i int) {
+		results[i] = checkWellKnownForUpdates(bases[i], groups[bases[i]])
+	})
+
+	type pendingSource struct {
+		base    string
+		items   []wellKnownItem
+		changed []string
+	}
+	var pending []pendingSource
+	for i, base := range bases {
+		printCheckingSource(w, base)
+		r := results[i]
+		switch r.status {
+		case "error":
+			fmt.Fprintf(w, "  %s✗ Failed to check skills from %s%s\n", ansiDim, base, ansiReset)
+			continue
+		case "current":
+			printNewSkills(w, base, r.newSkills, global)
+			continue
 		}
+		changed = true
+		promptDeletions(opts, base, r.removed, global)
+		printNewSkills(w, base, r.newSkills, global)
+		if len(r.changed) > 0 {
+			if opts.ReportOutdated != nil {
+				for _, name := range r.changed {
+					opts.ReportOutdated(name)
+				}
+			} else {
+				pending = append(pending, pendingSource{base, groups[base], r.changed})
+			}
+		}
+	}
+
+	reqs := make([]SourceRequest, len(pending))
+	for i, p := range pending {
+		reqs[i] = SourceRequest{Source: p.base, Skills: p.changed, Yes: true, Cwd: cwd}
+	}
+	fetched, errs := fetchAllForUpdate(reqs)
+	for i, p := range pending {
 		itemByName := map[string]wellKnownItem{}
-		for _, it := range items {
+		for _, it := range p.items {
 			itemByName[it.name] = it
 		}
-		for _, name := range changedNames {
-			if opts.ReportOutdated != nil {
-				opts.ReportOutdated(name)
-				continue
-			}
+		// One install per skill: each may record different Eve subagents.
+		for _, name := range p.changed {
 			fmt.Fprintf(w, "%sUpdating %s...%s\n", ansiText, SanitizeMetadata(name), ansiReset)
-			s := byName[name]
 			var subs []string
 			if !global {
 				subs = itemByName[name].subagents
 			}
-			ok, failed := reinstallSkill(s.Skill, global, cwd, "", subs)
-			errMsg := ""
-			if ok {
-				if err := record(name, fetched, s); err != nil {
+			installed, failed, errMsg := installFetched(fetched[i], errs[i], name, global, cwd, "", subs)
+			for _, s := range installed {
+				if err := record(p.base, fetched[i], s); err != nil && errMsg == "" {
 					errMsg = err.Error()
 				}
 			}
-			if reportInstall(w, name, ok, failed, errMsg) {
+			if reportInstall(w, name, len(installed) > 0, failed, errMsg) {
 				success++
 			} else {
 				fail++
 			}
 		}
-		_ = fetched.Cleanup()
+		_ = fetched[i].Cleanup()
 	}
 	return
 }
@@ -634,7 +790,64 @@ type globalUpdate struct {
 	name  string
 	entry SkillLockEntry
 	hash  string
-	skill Skill
+}
+
+// globalCheckout is the network half of a global source check: a GitHub tree,
+// a fresh checkout (with an optional note saying why it was cloned), or failed.
+type globalCheckout struct {
+	tree    *RepoTree
+	fetched *FetchedSource
+	note    string
+	failed  bool
+}
+
+// fetchGlobalSource checks GitHub sources through the Trees API unless a locked
+// skill path of the (source, ref) group is not a file in the tree (a rename, or
+// a truncated tree), in which case the repo is cloned to relocate it. The clone
+// is also the fallback when the API is unavailable (rate limit without auth,
+// private repo without a working token, network error). Other sources are
+// always cloned.
+func fetchGlobalSource(e SkillLockEntry, lockedSkillPaths []string, cwd string) globalCheckout {
+	note := ""
+	if e.SourceType == "github" {
+		tree, _ := FetchRepoTree(e.Source, e.Ref, GetGitHubToken)
+		if tree != nil {
+			blobs := map[string]bool{}
+			for _, te := range tree.Tree {
+				if te.Type == "blob" {
+					blobs[te.Path] = true
+				}
+			}
+			all := true
+			for _, p := range lockedSkillPaths {
+				if p != "" && !blobs[p] {
+					all = false
+					break
+				}
+			}
+			if all {
+				return globalCheckout{tree: tree}
+			}
+			note = "Skill paths changed; resolving via Git clone"
+		} else {
+			note = "GitHub API unavailable; checking via Git clone"
+		}
+	}
+	cloneURL := nonEmpty(e.SourceUrl, e.Source)
+	host := ""
+	if e.SourceType == "github" {
+		// Pin public GitHub shorthands so an ambient GH_HOST cannot redirect them.
+		host = "github.com"
+		if e.SourceUrl == "" && isBareShorthand(e.Source) {
+			cloneURL = "https://github.com/" + strings.TrimSuffix(e.Source, ".git") + ".git"
+		}
+	}
+	fetched, err := updateFetch(SourceRequest{Source: FormatSourceInput(cloneURL, e.Ref), Skills: []string{"*"}, FullDepth: true, IncludeDuplicateNames: true, NoBlob: true, Yes: true, Cwd: cwd, GitHubHost: host})
+	if err != nil || fetched == nil {
+		_ = fetched.Cleanup()
+		return globalCheckout{failed: true}
+	}
+	return globalCheckout{fetched: fetched, note: note}
 }
 
 // UpdateGlobalSkills checks (and unless in check mode, reinstalls) skills tracked
@@ -650,10 +863,12 @@ func UpdateGlobalSkills(opts *UpdateCheckOptions) (success, fail, checked int) {
 		}
 		return
 	}
-	names := keysOf(lock.Skills)
+	// Lock file order, as upstream iterates Object.keys(lock.skills).
+	names := lock.orderedSkillNames()
 
 	var skipped []SkippedSkill
 	var checkable []string
+	var wkBases []string
 	wkGroups := map[string][]wellKnownItem{}
 	var downloads []downloadItem
 	for _, name := range names {
@@ -663,6 +878,9 @@ func UpdateGlobalSkills(opts *UpdateCheckOptions) (success, fail, checked int) {
 		e := lock.Skills[name]
 		switch {
 		case e.SourceType == "well-known" && e.SourceBaseUrl != "" && e.WellKnownDigest != "":
+			if _, ok := wkGroups[e.SourceBaseUrl]; !ok {
+				wkBases = append(wkBases, e.SourceBaseUrl)
+			}
 			wkGroups[e.SourceBaseUrl] = append(wkGroups[e.SourceBaseUrl], wellKnownItem{name: name, digest: e.WellKnownDigest})
 		case e.SourceType == "download" && e.SourceUrl != "":
 			downloads = append(downloads, downloadItem{name: name, url: e.SourceUrl, skillPath: e.SkillPath, hash: e.SkillFolderHash, installMode: e.InstallMode})
@@ -677,13 +895,15 @@ func UpdateGlobalSkills(opts *UpdateCheckOptions) (success, fail, checked int) {
 	for _, g := range wkGroups {
 		wkCount += len(g)
 	}
-	s1, f1, wkChanged := processWellKnownUpdates(opts, wkGroups, true, func(name string, fs *FetchedSource, s FetchedSkill) error {
-		e := lock.Skills[name]
-		e.WellKnownDigest = s.WellKnownDigest
-		if h, err := ComputeSkillFolderHash(s.Path); err == nil {
-			e.SkillFolderHash = h
+	s1, f1, wkChanged := processWellKnownUpdates(opts, wkBases, wkGroups, true, func(base string, _ *FetchedSource, s FetchedSkill) error {
+		if s.WellKnownDigest == "" {
+			return nil
 		}
-		return AddSkillToLock(name, e)
+		// Upstream globalWellKnownLockEntry: a fresh entry for the index.
+		return AddSkillToLock(s.Name, SkillLockEntry{
+			Source: GetWellKnownSourceIdentifier(base), SourceType: "well-known", SourceUrl: s.SourceURL,
+			SourceBaseUrl: base, WellKnownDigest: s.WellKnownDigest,
+		})
 	})
 	s2, f2, dlUpToDate := processDownloadUpdates(opts, downloads, true, func(it downloadItem, skillPath, hash string) error {
 		e := lock.Skills[it.name]
@@ -707,40 +927,7 @@ func UpdateGlobalSkills(opts *UpdateCheckOptions) (success, fail, checked int) {
 		}
 		groups[key] = append(groups[key], name)
 	}
-
-	onDisk := installedSkillNames(true, cwd)
-	var updates []globalUpdate
-	var openSources []*FetchedSource
-	defer func() {
-		for _, f := range openSources {
-			_ = f.Cleanup()
-		}
-	}()
-	for _, key := range groupKeys {
-		items := groups[key]
-		first := lock.Skills[items[0]]
-		source := first.Source
-		fmt.Fprintf(w, "%sChecking skills from source: %s%s\n", ansiDim, source, ansiReset)
-
-		cloneURL := first.SourceUrl
-		if cloneURL == "" {
-			cloneURL = source
-		}
-		host := ""
-		if first.SourceType == "github" {
-			// Pin public GitHub shorthands so an ambient GH_HOST cannot redirect them.
-			host = "github.com"
-			if first.SourceUrl == "" && isBareShorthand(source) {
-				cloneURL = "https://github.com/" + strings.TrimSuffix(source, ".git") + ".git"
-			}
-		}
-		fetched, err := updateFetch(SourceRequest{Source: FormatSourceInput(cloneURL, first.Ref), Skills: []string{"*"}, FullDepth: true, NoBlob: true, Yes: true, Cwd: cwd, GitHubHost: host})
-		if err != nil || fetched == nil {
-			fmt.Fprintf(w, "  %s✗ Failed to check skills from %s%s\n", ansiDim, source, ansiReset)
-			continue
-		}
-		openSources = append(openSources, fetched)
-
+	lockedFor := func(first SkillLockEntry) ([]string, map[string]string) {
 		var lockedNames []string
 		lockedPaths := map[string]string{}
 		for _, n := range names {
@@ -749,6 +936,48 @@ func UpdateGlobalSkills(opts *UpdateCheckOptions) (success, fail, checked int) {
 				lockedPaths[n] = e.SkillPath
 			}
 		}
+		return lockedNames, lockedPaths
+	}
+
+	onDisk := installedSkillNames(true, cwd)
+	printFetching(w, len(groupKeys))
+	checkouts := make([]globalCheckout, len(groupKeys))
+	fpMapConcurrent(len(groupKeys), FetchConcurrency(), func(i int) {
+		first := lock.Skills[groups[groupKeys[i]][0]]
+		lockedNames, lockedPaths := lockedFor(first)
+		paths := make([]string, len(lockedNames))
+		for j, n := range lockedNames {
+			paths[j] = lockedPaths[n]
+		}
+		checkouts[i] = fetchGlobalSource(first, paths, cwd)
+	})
+
+	var updates []globalUpdate
+	for i, key := range groupKeys {
+		items := groups[key]
+		first := lock.Skills[items[0]]
+		source := first.Source
+		co := checkouts[i]
+		printCheckingSource(w, source)
+		if co.failed {
+			fmt.Fprintf(w, "  %s✗ Failed to check skills from %s%s\n", ansiDim, source, ansiReset)
+			continue
+		}
+		if co.tree != nil {
+			for _, name := range items {
+				e := lock.Skills[name]
+				latest := GetSkillFolderHashFromTree(co.tree, e.SkillPath)
+				if latest != "" && (latest != e.SkillFolderHash || !onDisk[name]) {
+					updates = append(updates, globalUpdate{name: name, entry: e, hash: latest})
+				}
+			}
+			continue
+		}
+		if co.note != "" {
+			fmt.Fprintf(w, "  %s%s%s\n", ansiDim, co.note, ansiReset)
+		}
+		fetched := co.fetched
+		lockedNames, lockedPaths := lockedFor(first)
 		locs, byPath := discoveredLocations(fetched)
 		res := checkAndPromptForDeletions(opts, source, lockedNames, lockedPaths, true, locs, !ShouldUseFullDepthForUpdate(UpdateSourceFromGlobal(first)))
 		deleted := map[string]bool{}
@@ -781,9 +1010,13 @@ func UpdateGlobalSkills(opts *UpdateCheckOptions) (success, fail, checked int) {
 			relocated := skillPath != e.SkillPath
 			if relocated || (latest != "" && (latest != e.SkillFolderHash || !onDisk[name])) {
 				e.SkillPath = skillPath
-				updates = append(updates, globalUpdate{name: name, entry: e, hash: latest, skill: current.Skill})
+				updates = append(updates, globalUpdate{name: name, entry: e, hash: latest})
 			}
 		}
+		_ = fetched.Cleanup()
+	}
+	if len(checkable) > 0 {
+		fmt.Fprint(w, "\r\x1b[K")
 	}
 
 	checked = len(checkable) + len(skipped) + otherCount
@@ -802,10 +1035,10 @@ func UpdateGlobalSkills(opts *UpdateCheckOptions) (success, fail, checked int) {
 		printSkippedSkills(w, skipped)
 		return
 	case len(updates) == 0:
+		// Upstream returns here without listing the skipped skills.
 		if !otherChanged {
 			fmt.Fprintf(w, "%s✓ All global skills are up to date%s\n", ansiText, ansiReset)
 		}
-		printSkippedSkills(w, skipped)
 		return
 	}
 	if opts.ReportOutdated != nil {
@@ -817,23 +1050,46 @@ func UpdateGlobalSkills(opts *UpdateCheckOptions) (success, fail, checked int) {
 	}
 
 	fmt.Fprintf(w, "%sFound %d global update(s)%s\n\n", ansiText, len(updates), ansiReset)
+	// Each update is fetched on its own, with its skill folder as the subpath,
+	// as `add` would, so eligible GitHub repos take the blob fast path.
+	type installableUpdate struct {
+		globalUpdate
+		req SourceRequest
+	}
+	var installable []installableUpdate
 	for _, u := range updates {
-		if BuildUpdateInstallSource(UpdateSourceFromGlobal(u.entry)) == "" {
+		src := UpdateSourceFromGlobal(u.entry)
+		installURL := BuildUpdateInstallSource(src)
+		if installURL == "" {
 			fail++
 			fmt.Fprintf(w, "  %s✗ Cannot update %s: lock file is missing sourceUrl for this generic Git source%s\n", ansiDim, SanitizeMetadata(u.name), ansiReset)
 			continue
 		}
+		host := ""
+		if u.entry.SourceType == "github" {
+			host = "github.com"
+		}
+		installable = append(installable, installableUpdate{u, SourceRequest{
+			Source: installURL, Skills: []string{u.name}, FullDepth: ShouldUseFullDepthForUpdate(src), Yes: true, Cwd: cwd, GitHubHost: host,
+		}})
+	}
+	reqs := make([]SourceRequest, len(installable))
+	for i, u := range installable {
+		reqs[i] = u.req
+	}
+	fetched, errs := fetchAllForUpdate(reqs)
+	for i, u := range installable {
 		fmt.Fprintf(w, "%sUpdating %s...%s\n", ansiText, SanitizeMetadata(u.name), ansiReset)
-		ok, failed := reinstallSkill(u.skill, true, cwd, u.entry.InstallMode, nil)
-		errMsg := ""
-		if ok {
+		installed, failed, errMsg := installFetched(fetched[i], errs[i], u.name, true, cwd, u.entry.InstallMode, nil)
+		_ = fetched[i].Cleanup()
+		if len(installed) > 0 {
 			e := u.entry
 			e.SkillFolderHash = u.hash
 			if err := AddSkillToLock(u.name, e); err != nil {
 				errMsg = err.Error()
 			}
 		}
-		if reportInstall(w, u.name, ok, failed, errMsg) {
+		if reportInstall(w, u.name, len(installed) > 0, failed, errMsg) {
 			success++
 		} else {
 			fail++
@@ -877,6 +1133,7 @@ func UpdateProjectSkills(opts *UpdateCheckOptions) (success, fail, found int, er
 	}
 	found = len(skills)
 
+	var wkBases []string
 	wkGroups := map[string][]wellKnownItem{}
 	var downloads []downloadItem
 	var updatable, legacy []projectSkill
@@ -886,6 +1143,9 @@ func UpdateProjectSkills(opts *UpdateCheckOptions) (success, fail, found int, er
 		case e.SourceType == "download" && e.SourceUrl != "":
 			downloads = append(downloads, downloadItem{name: s.name, url: e.SourceUrl, skillPath: e.SkillPath, hash: e.ComputedHash, installMode: e.InstallMode, subagents: e.Subagents})
 		case e.SourceType == "well-known" && e.SourceUrl != "" && e.WellKnownDigest != "":
+			if _, ok := wkGroups[e.SourceUrl]; !ok {
+				wkBases = append(wkBases, e.SourceUrl)
+			}
 			wkGroups[e.SourceUrl] = append(wkGroups[e.SourceUrl], wellKnownItem{name: s.name, digest: e.WellKnownDigest, subagents: e.Subagents})
 		case e.SkillPath != "":
 			updatable = append(updatable, s)
@@ -931,9 +1191,19 @@ func UpdateProjectSkills(opts *UpdateCheckOptions) (success, fail, found int, er
 		mutate(&e)
 		return AddSkillToLocalLock(name, e, cwd)
 	}
-	wkS, wkF, _ := processWellKnownUpdates(opts, wkGroups, false, func(name string, fs *FetchedSource, s FetchedSkill) error {
-		h, _ := ComputeSkillFolderHash(s.Path)
-		return recordLocal(name, func(e *LocalSkillLockEntry) { e.WellKnownDigest, e.ComputedHash = s.WellKnownDigest, h })
+	wkS, wkF, _ := processWellKnownUpdates(opts, wkBases, wkGroups, false, func(base string, f *FetchedSource, s FetchedSkill) error {
+		if s.WellKnownDigest == "" {
+			return nil
+		}
+		// Hash the skill as installed (metadata.json and caches excluded), as
+		// add and install --frozen-lockfile do, so the lock does not drift.
+		h, _ := addStagedCopyHash(s.Path)
+		u := nonEmpty(f.Parsed.URL, base)
+		// Upstream recordProjectLock -> wellKnownLockEntry: a fresh entry.
+		return AddSkillToLocalLock(s.Name, LocalSkillLockEntry{
+			Source: GetWellKnownSourceIdentifier(u), SourceUrl: u, SourceType: "well-known",
+			ComputedHash: h, WellKnownDigest: s.WellKnownDigest,
+		}, cwd)
 	})
 	success += wkS
 	fail += wkF
@@ -943,6 +1213,8 @@ func UpdateProjectSkills(opts *UpdateCheckOptions) (success, fail, found int, er
 	success += dlS
 	fail += dlF
 
+	// Key by source AND ref so skills from one repo pinned to different refs are
+	// each checked against their own ref's tree.
 	var groupKeys []string
 	groups := map[string][]projectSkill{}
 	for _, s := range updatable {
@@ -953,27 +1225,53 @@ func UpdateProjectSkills(opts *UpdateCheckOptions) (success, fail, found int, er
 		}
 		groups[key] = append(groups[key], s)
 	}
+	// Re-read the lock: the well-known and download updates above may have
+	// changed it.
+	latestLock := lock
+	if l, err := ReadLocalLock(cwd); err == nil {
+		latestLock = l
+	}
 	onDisk := installedSkillNames(false, cwd)
-	for _, key := range groupKeys {
+
+	cloneSources := make([]string, len(groupKeys))
+	toFetch := 0
+	for i, key := range groupKeys {
+		cloneSources[i] = BuildLocalCloneSource(UpdateSourceFromLocal(groups[key][0].entry))
+		if cloneSources[i] != "" {
+			toFetch++
+		}
+	}
+	printFetching(w, toFetch)
+	clones := make([]*FetchedSource, len(groupKeys))
+	cloneErrs := make([]error, len(groupKeys))
+	fpMapConcurrent(len(groupKeys), FetchConcurrency(), func(i int) {
+		if cloneSources[i] == "" {
+			return
+		}
+		first := groups[groupKeys[i]][0].entry
+		clones[i], cloneErrs[i] = updateFetch(SourceRequest{Source: FormatSourceInput(cloneSources[i], first.Ref), Skills: []string{"*"}, FullDepth: true, IncludeDuplicateNames: true, NoBlob: true, Yes: true, Cwd: cwd})
+	})
+
+	for i, key := range groupKeys {
 		group := groups[key]
 		first := group[0].entry
 		source := nonEmpty(first.SourceUrl, first.Source)
 		var lockedNames []string
 		lockedPaths := map[string]string{}
-		for _, n := range keysOf(lock.Skills) {
-			if e := lock.Skills[n]; nonEmpty(e.SourceUrl, e.Source) == source && e.Ref == first.Ref {
+		for _, n := range keysOf(latestLock.Skills) {
+			if e := latestLock.Skills[n]; nonEmpty(e.SourceUrl, e.Source) == source && e.Ref == first.Ref {
 				lockedNames = append(lockedNames, n)
 				lockedPaths[n] = e.SkillPath
 			}
 		}
-		cloneSource := BuildLocalCloneSource(UpdateSourceFromLocal(first))
-		if cloneSource == "" {
+		if cloneSources[i] == "" {
 			fail += len(group)
 			fmt.Fprintf(w, "%s✗ Cannot update %s: skills-lock.json is missing sourceUrl for this generic Git source%s\n", ansiDim, source, ansiReset)
 			continue
 		}
-		fetched, ferr := updateFetch(SourceRequest{Source: FormatSourceInput(cloneSource, first.Ref), Skills: []string{"*"}, FullDepth: true, NoBlob: true, Yes: true, Cwd: cwd})
-		if ferr != nil || fetched == nil {
+		fetched := clones[i]
+		if cloneErrs[i] != nil || fetched == nil {
+			_ = fetched.Cleanup()
 			fail += len(group)
 			fmt.Fprintf(w, "%s✗ Failed to check for deleted skills from %s%s\n", ansiDim, source, ansiReset)
 			continue

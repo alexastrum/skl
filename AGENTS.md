@@ -9,7 +9,7 @@ We track the original TypeScript `skills` npm package (vercel-labs/skills v1.7.6
 * Project installs go to `.agents/skills/` like every other universal agent.
 * Global installs go to `~/.gemini/config/skills/` (`GlobalReadsCanonical: false`, upstream #2566). Antigravity does not read `~/.agents/skills`, so the global canonical copy is linked into `~/.gemini/config/skills/<skill>`.
 * Detection accepts either `~/.gemini/config` (original IDE) or `~/.gemini/antigravity` (2.0). Upstream checks only `~/.gemini/antigravity`.
-* `antigravity-cli` is a separate agent with the same folders. It is detected via `~/.gemini/antigravity-cli` on disk, or `ANTIGRAVITY_CLI_ALIAS` in the environment when `skl` runs inside the CLI.
+* `antigravity-cli` is a separate agent with the same folders. It is detected via `~/.gemini/antigravity-cli` on disk.
 
 IMPORTANT: ONLY WHEN EDITING README.md or human docs (eg --help) run /humanizer skill.
 
@@ -34,7 +34,7 @@ func DetectInstalledAgents(cwd string) []AgentType {
 }
 ```
 
-`DetectAgent` in `src/skl/detect_agent.go` is a different question: which agent is running `skl` right now (a port of `@vercel/detect-agent`). It reads environment variables such as `CLAUDECODE`, `CODEX_THREAD_ID`, `CURSOR_AGENT`, `GEMINI_CLI`, `ANTIGRAVITY_AGENT`, and `ANTIGRAVITY_CLI_ALIAS`. When it finds one, `add` runs non-interactively and targets that agent.
+`DetectAgent` in `src/skl/detect_agent.go` is a different question: which agent is running `skl` right now (a port of `@vercel/detect-agent`). It reads environment variables such as `CLAUDECODE`, `CODEX_THREAD_ID`, `CURSOR_AGENT`, `GEMINI_CLI`, and `ANTIGRAVITY_AGENT`. When it finds one, `add` runs non-interactively and targets that agent.
 
 ## 🔗 Symlink Routing
 
@@ -95,7 +95,6 @@ Each of these is marked with an `// Intentional divergence:` comment at the poin
 
 | Area | Upstream (v1.7.6) | `skl` | Where |
 | :--- | :--- | :--- | :--- |
-| Antigravity CLI detection | `@vercel/detect-agent@1.2.3` has no `ANTIGRAVITY_CLI_ALIAS` check; the CLI is reported as `antigravity`. | `ANTIGRAVITY_CLI_ALIAS` set in the environment reports `antigravity-cli`. | `detect_agent.go` |
 | Antigravity install detection | Only `~/.gemini/antigravity` marks Antigravity as installed. | `~/.gemini/config` or `~/.gemini/antigravity` does. | `types.go` (`antigravity.DetectInstalled`) |
 | Terminal escape stripping | `CONTROL_RE` leaves a lone `ESC` (0x1b) in place. | `StripTerminalEscapes` also removes a lone `ESC`, since it can still start a sequence in the terminal that prints it. | `types.go` |
 | Tar archives | `download-source` silently skips symlink and hardlink entries. | `ExtractTarArchive` rejects the archive with a diagnostic. | `providers.go` |
@@ -104,8 +103,9 @@ Each of these is marked with an `// Intentional divergence:` comment at the poin
 | Security audit | Runs a security audit after install and records the result in the lock. | Not ported. `security` is always `null` in `--json` output. | `add.go` |
 | Post-install prompt | `add` offers to run `find` for related skills. | Not ported (it would trigger a network call). | `add.go` |
 | `config` command | Not present. | `skl config set|get canonicalDir.global|canonicalDir.project` writes `$XDG_CONFIG_HOME/skills/config.json`. | `config.go`, `main.go` |
-| Interactive pickers | Raw TTY, arrow-key menus. | Line-based prompts (type a number or name). Without a TTY a required prompt fails with `SKILLS_PROMPT_REQUIRES_TTY`. | `add.go`, `find.go`, `remove.go`, `experimental_sync.go` |
-| Global GitHub update check | Uses the Git Trees API fast path. | Clones the repository. | `update.go` |
 | No agent detected | `add` offers all agents with `-y`, or prompts. | Same, except the legacy `AddSkill` entry point installs for Antigravity plus the canonical dir and prints the agy-cli tip (`maybeSuggestAgy`). `--agent universal` always means the canonical directory. | `add.go`, `installer.go`, `agy-onboarding.go` |
 
-Known approximations rather than divergences: non-ASCII collation in `jsLocaleCompare` (used for lock hashes) is approximate, and JSON lone surrogates decode to U+FFFD.
+Known approximations rather than divergences:
+
+*   Lock hashes and the `add` skill picker sort with `golang.org/x/text/collate` (root collation, Unicode 6.2 / CLDR 23 tables), while Node 24 `localeCompare` uses ICU 78 (Unicode 17, CLDR 48). Against Node 24.16 on 72.8M string pairs, the order agrees for 100% of ASCII pairs and 98.1% of non-ASCII pairs (`lock_test.go` pins examples of each difference). The differences: emoji newer than Unicode 6.2 (such as 🦀 and 🫠) sort after all letters instead of with the other symbols; Han characters outside the main CJK block sort by block instead of radical-stroke order; Node treats digits from other scripts (٠, ০, ๐) as equal to ASCII digits, x/text sorts them after; x/text treats ў as у with a breve, where newer CLDR makes it a separate letter; and Node sorts ’ before ‘, x/text the reverse. A skill whose file paths hit one of these gets a different `computedHash` than `npx skills` computes. Paths that collate equal (NFC and NFD spellings, for example) fall back to byte order; upstream keeps directory read order for them.
+*   JSON lone surrogates decode to U+FFFD.

@@ -361,16 +361,18 @@ func TestSkillsShTreeHashAndGitTreeHash(t *testing.T) {
 // Expected values in the tests below were produced by Node 24 running the upstream logic
 // (localeCompare + sha256 from src/local-lock.ts, Buffer.toString('utf8'), JSON.stringify).
 
-func TestJSLocaleCompareMatchesNodeOrder(t *testing.T) {
+func TestLocaleCollatorMatchesNodeOrder(t *testing.T) {
+	coll := newLocaleCollator()
 	want := []string{"_meta.json", "a_b.md", "a-b.md", "a.b.md", "alpha.md", "README.md",
 		"references/api.md", "scripts/run.py", "SKILL.md", "Zeta.md"}
 	got := []string{"Zeta.md", "SKILL.md", "scripts/run.py", "references/api.md", "README.md",
 		"alpha.md", "a.b.md", "a-b.md", "a_b.md", "_meta.json"}
-	sort.SliceStable(got, func(i, j int) bool { return jsLocaleCompare(got[i], got[j]) < 0 })
+	sort.SliceStable(got, func(i, j int) bool { return localePathCompare(coll, got[i], got[j]) < 0 })
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("localeCompare order = %q, want %q", got, want)
 	}
 
+	// want is the sign of Node's a.localeCompare(b).
 	pairs := []struct {
 		a, b string
 		want int
@@ -384,12 +386,93 @@ func TestJSLocaleCompareMatchesNodeOrder(t *testing.T) {
 		{"a\x01b", "ab", 0}, // C0 controls are ignorable
 		{"a b", "a\tb", 1},  // whitespace is not ignorable
 		{"scripts/b", "Scripts/a", 1},
+		{"e\u0301", "é", 0}, // NFD and NFC spellings are equal
+		{"resume", "résumé", -1},
+		{"résumé", "Résumé", -1},
+		{"coté", "côte", -1}, // no French backwards accent ordering in the root collation
+		{"naïve", "naive", 1},
+		{"strasse", "straße", -1},
+		{"straße", "strassen", -1},
+		{"ß", "ss", 1},
+		{"Ä", "ae", -1},
+		{"å", "b", -1}, // no Nordic tailoring: å sorts with a, ø with o
+		{"ø", "p", -1},
+		{"z", "å", 1},
+		{"æ", "af", -1},
+		{"ı", "i", 1},
+		{"İ", "i", 1},
+		{"ı", "j", -1},
+		{"α", "ά", -1},
+		{"z", "α", -1}, // Latin < Greek < Cyrillic
+		{"σ", "ς", -1},
+		{"Ω", "ω", 1},
+		{"е", "ё", -1},
+		{"я", "а", 1},
+		{"z", "а", -1},
+		{"і", "й", -1},
+		{"あ", "ア", -1},
+		{"一", "あ", 1},
+		{"日本", "本日", -1},
+		{"ｱ", "ア", 1},
+		{"가", "\u1100\u1161", 0}, // precomposed and conjoining-jamo Hangul are equal
+		{"가", "나", -1},
+		{"힣", "가", 1},
+		{"ا", "ب", -1},
+		{"א", "ا", -1},
+		{"ב", "א", 1},
+		{"a", "ａ", -1}, // fullwidth is a tertiary difference
+		{"ａ", "b", -1},
+		{"Ａ", "ａ", 1},
+		{"０", "1", -1},
+		{"a-b", "a–b", -1},
+		{"a_B", "A_b", -1},
+		{"a b", "a\u00a0b", -1},
+		{"a\u00adb", "ab", 0}, // soft hyphen is ignorable
+		{"a—b", "a-c", 1},
+		{"😀", "a", -1},
+		{"€", "$", 1},
+		{"©", "a", -1},
 	}
 	for _, p := range pairs {
-		if got := jsLocaleCompare(p.a, p.b); got != p.want {
-			t.Errorf("jsLocaleCompare(%q, %q) = %d, want %d", p.a, p.b, got, p.want)
+		if got := sign(coll.CompareString(p.a, p.b)); got != p.want {
+			t.Errorf("CompareString(%q, %q) = %d, want Node's %d", p.a, p.b, got, p.want)
 		}
 	}
+
+	// Known differences: golang.org/x/text ships Unicode 6.2 / CLDR 23 tables, older than the
+	// ICU data in Node 24 (Unicode 17, CLDR 48). These vectors pin the x/text result; node is
+	// what Node returns. If an x/text upgrade starts matching Node, move the pair up.
+	known := []struct {
+		a, b        string
+		xtext, node int
+	}{
+		{"🦀", "a", 1, -1},      // emoji newer than Unicode 6.2 sort after letters, not with symbols
+		{"🫠", "😀", 1, -1},      // and after every emoji that Unicode 6.2 has
+		{"у.md", "ў", -1, 1},   // newer CLDR makes ў a separate letter after у
+		{"‘x", "’", -1, 1},     // quotation mark order changed
+		{"二", "㐀", -1, 1},      // Node orders Han by radical-stroke, x/text by code block
+		{"0", "\u0660", -1, 0}, // Node treats digits from other scripts as equal to ASCII digits
+	}
+	for _, k := range known {
+		if got := sign(coll.CompareString(k.a, k.b)); got != k.xtext {
+			t.Errorf("CompareString(%q, %q) = %d, want x/text's %d (Node returns %d)", k.a, k.b, got, k.xtext, k.node)
+		}
+	}
+
+	// Collation ties break by byte order, so equal-collating paths still hash deterministically.
+	if got := localePathCompare(coll, "caf\u00e9.md", "cafe\u0301.md"); got != 1 {
+		t.Errorf("localePathCompare(NFC, NFD) = %d, want 1 (byte order)", got)
+	}
+}
+
+func sign(x int) int {
+	switch {
+	case x < 0:
+		return -1
+	case x > 0:
+		return 1
+	}
+	return 0
 }
 
 func TestComputeSkillFolderHashUsesLocaleOrder(t *testing.T) {
@@ -399,8 +482,8 @@ func TestComputeSkillFolderHashUsesLocaleOrder(t *testing.T) {
 		want  string
 		// order, when set, is the expected hash input order of files.
 		order []string
-		// caseOnly marks fixtures with paths that differ only by case. They
-		// collide on case-insensitive filesystems (APFS, NTFS), so the on-disk
+		// caseOnly marks fixtures with paths that differ only by case (or case-fold to the
+		// same name). They collide on case-insensitive filesystems (APFS, NTFS), so the on-disk
 		// check is skipped there; the in-memory check still runs everywhere.
 		caseOnly bool
 	}{
@@ -425,6 +508,34 @@ func TestComputeSkillFolderHashUsesLocaleOrder(t *testing.T) {
 				"Scripts/a.sh", "scripts/b.sh", "SKILL.md"},
 			caseOnly: true,
 		},
+		{
+			name: "Latin accents, German and Nordic letters",
+			files: map[string]string{"SKILL.md": "# s\n", "références/été.md": "a", "references/ete.md": "b",
+				"straße.md": "c", "strassen.md": "d", "Ølfabrik.md": "e", "åsa.md": "f", "zebra.md": "g", "Éclair.md": "h"},
+			want: "3ecf4257f956f5ade371083ea4efaf813825f9cd6878f3cf8c85e43ebf046fcc",
+			order: []string{"åsa.md", "Éclair.md", "Ølfabrik.md", "references/ete.md", "références/été.md",
+				"SKILL.md", "straße.md", "strassen.md", "zebra.md"},
+		},
+		{
+			name: "Greek, Cyrillic, CJK, Hangul, Hebrew, Arabic and fullwidth",
+			files: map[string]string{"SKILL.md": "# s\n", "docs/русский.md": "1", "docs/ελληνικά.md": "2",
+				"docs/한국어.md": "3", "docs/日本語.md": "4", "docs/עברית.md": "5", "docs/العربية.md": "6",
+				"docs/english.md": "7", "ｆｕｌｌ.md": "8", "docs/ドキュメント.md": "9"},
+			want: "38c9ae39dca789ad808b5794a08479bd11178bcdbde513c20c1c78330b32bed2",
+			order: []string{"docs/english.md", "docs/ελληνικά.md", "docs/русский.md", "docs/עברית.md",
+				"docs/العربية.md", "docs/한국어.md", "docs/ドキュメント.md", "docs/日本語.md", "ｆｕｌｌ.md", "SKILL.md"},
+		},
+		{
+			name: "Turkish dotless i and punctuation",
+			files: map[string]string{"SKILL.md": "# s\n", "ılık.md": "1", "Ilık.md": "2", "ilik.md": "3",
+				"notes – draft.md": "4", "notes - draft.md": "5", "notes_draft.md": "6", "«quoted».md": "7",
+				"€uro.md": "8", "Zürich.md": "9"},
+			want: "ce25a7ee2301440e86d9b0afaf9b56cddde72c720e019e90cc50dcce983577e6",
+			order: []string{"«quoted».md", "€uro.md", "ilik.md", "Ilık.md", "ılık.md", "notes - draft.md",
+				"notes – draft.md", "notes_draft.md", "SKILL.md", "Zürich.md"},
+			// Ilık.md and ılık.md can fold to the same name on NTFS, where ı uppercases to I.
+			caseOnly: true,
+		},
 	}
 	caseInsensitive := isCaseInsensitiveFS(t)
 	for _, tt := range tests {
@@ -435,11 +546,9 @@ func TestComputeSkillFolderHashUsesLocaleOrder(t *testing.T) {
 			for rel := range tt.files {
 				paths = append(paths, rel)
 			}
+			coll := newLocaleCollator()
 			sort.SliceStable(paths, func(i, j int) bool {
-				if c := jsLocaleCompare(paths[i], paths[j]); c != 0 {
-					return c < 0
-				}
-				return paths[i] < paths[j]
+				return localePathCompare(coll, paths[i], paths[j]) < 0
 			})
 			if tt.order != nil && !reflect.DeepEqual(paths, tt.order) {
 				t.Errorf("order = %q, want %q", paths, tt.order)

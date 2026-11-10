@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -1002,6 +1001,7 @@ func runSync(opts SyncOptions, cwd string, stdout, stderr io.Writer) int {
 	// Select agents.
 	var targets []AgentType
 	universal := GetUniversalAgents()
+	prompt := newPromptTerm(syncStdin, stdout, stdinIsTTY())
 	switch {
 	case containsAgent(opts.Agent, "*"):
 		for _, k := range sortedAgentKeys() {
@@ -1034,12 +1034,24 @@ func runSync(opts SyncOptions, cwd string, stdout, stderr io.Writer) int {
 		case len(installed) == 1 || opts.Yes || !stdinIsTTY():
 			targets = withUniversal(installed)
 		default:
-			picked, ok := promptSyncAgents(stdout, installed)
-			if !ok {
+			// No detected agents: offer all; several: offer the detected ones.
+			var choices, fallback []AgentType
+			for _, a := range GetNonUniversalAgents() {
+				if a != AgentUniversal && (len(installed) == 0 || containsAgent(installed, a)) {
+					choices = append(choices, a)
+				}
+			}
+			for _, a := range installed {
+				if !containsAgent(universal, a) {
+					fallback = append(fallback, a)
+				}
+			}
+			picked, err := promptSyncAgents(prompt, choices, fallback)
+			if err != nil {
 				fmt.Fprintln(stdout, "Sync cancelled")
 				return finish(0)
 			}
-			targets = withUniversal(picked)
+			targets = picked
 		}
 	}
 
@@ -1119,8 +1131,7 @@ func runSync(opts SyncOptions, cwd string, stdout, stderr io.Writer) int {
 		return finish(0)
 	}
 	if !opts.Yes {
-		ans, ok := promptLine(bufio.NewReader(os.Stdin), stdout, "Proceed with sync? (y/N) ")
-		if !ok || !(strings.EqualFold(ans, "y") || strings.EqualFold(ans, "yes")) {
+		if !confirmOrLine(prompt, bufio.NewReader(syncStdin), "Proceed with sync?") {
 			fmt.Fprintln(stdout, "Sync cancelled")
 			return finish(0)
 		}
@@ -1284,43 +1295,53 @@ func syncInstallRemote(f *FetchedSource, names []string, agents []AgentType, fro
 	return restoreInstall(f, names, agents, frozen, InstallModeSymlink, via, cwd)
 }
 
-// promptSyncAgents asks which detected agents to sync to (universal agents are
-// always included by the caller). ok is false on cancel.
-func promptSyncAgents(w io.Writer, choices []AgentType) ([]AgentType, bool) {
-	var offered []AgentType
-	for _, a := range choices {
-		if !IsUniversalAgent(a) {
-			offered = append(offered, a)
+// syncStdin is where sync prompts read keys (overridable in tests).
+var syncStdin io.Reader = os.Stdin
+
+// promptSyncAgents is upstream promptForAgentChoice: universal agents are a
+// locked section, choices are selectable, and the last saved choice (or
+// fallback) starts selected. The selection is saved for next time.
+func promptSyncAgents(t *promptTerm, choices, fallback []AgentType) ([]AgentType, error) {
+	universal := GetUniversalAgents()
+	visible := GetVisibleUniversalAgents()
+	locked := &LockedSection{Title: "Universal (.agents/skills)", HiddenCount: len(universal) - len(visible)}
+	for _, a := range visible {
+		locked.Items = append(locked.Items, SearchItem{Value: string(a), Label: Agents[a].DisplayName})
+	}
+	items := make([]SearchItem, len(choices))
+	for i, a := range choices {
+		items[i] = SearchItem{Value: string(a), Label: Agents[a].DisplayName, Hint: Agents[a].SkillsDir}
+	}
+	var remembered, initial []int
+	if last, err := GetLastSelectedAgents(); err == nil {
+		for i, a := range choices {
+			if contains(last, string(a)) {
+				remembered = append(remembered, i)
+			}
 		}
 	}
-	if len(offered) == 0 {
-		return nil, true
-	}
-	fmt.Fprintln(w, "Which agents do you want to install to? (universal .agents/skills is always included)")
-	for i, a := range offered {
-		fmt.Fprintf(w, "  %d) %s (%s)\n", i+1, Agents[a].DisplayName, Agents[a].SkillsDir)
-	}
-	ans, ok := promptLine(bufio.NewReader(os.Stdin), w, "Select agents (comma-separated numbers, empty for all listed): ")
-	if !ok {
-		return nil, false
-	}
-	if ans == "" {
-		return offered, true
-	}
-	var picked []AgentType
-	for _, part := range strings.Split(ans, ",") {
-		n, err := strconv.Atoi(strings.TrimSpace(part))
-		if err != nil || n < 1 || n > len(offered) {
-			return nil, false
+	initial = remembered
+	if len(initial) == 0 {
+		for i, a := range choices {
+			if containsAgent(fallback, a) {
+				initial = append(initial, i)
+			}
 		}
-		picked = append(picked, offered[n-1])
 	}
-	_ = SaveSelectedAgents(func() []string {
-		out := make([]string, len(picked))
-		for i, a := range picked {
-			out[i] = string(a)
-		}
-		return out
-	}())
-	return picked, true
+	idx, err := t.SearchMultiSelect(SearchMultiSelectOptions{
+		Message: "Which agents do you want to install to?", Items: items, Initial: initial, Locked: locked,
+	})
+	if err != nil {
+		return nil, err
+	}
+	picked := append([]AgentType{}, visible...)
+	for _, i := range idx {
+		picked = append(picked, choices[i])
+	}
+	names := make([]string, len(picked))
+	for i, a := range picked {
+		names[i] = string(a)
+	}
+	_ = SaveSelectedAgents(names)
+	return picked, nil
 }

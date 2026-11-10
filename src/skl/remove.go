@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -477,16 +476,6 @@ var stdinIsTTY = func() bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-// promptLine prints prompt and reads one trimmed line; ok is false on EOF/error.
-func promptLine(in *bufio.Reader, out io.Writer, prompt string) (string, bool) {
-	fmt.Fprint(out, prompt)
-	line, err := in.ReadString('\n')
-	if err != nil && line == "" {
-		return "", false
-	}
-	return strings.TrimSpace(line), true
-}
-
 // RunRemove implements `skl remove`, returning the process exit code.
 func RunRemove(skillNames []string, opts RemoveOptions, cwd string) int {
 	return runRemove(skillNames, opts, cwd, os.Stdout, os.Stderr, os.Stdin)
@@ -527,6 +516,7 @@ func runRemove(skillNames []string, opts RemoveOptions, cwd string, stdout, stde
 	}
 
 	reader := bufio.NewReader(stdin)
+	prompt := newPromptTerm(stdin, stdout, stdinIsTTY())
 	if !opts.All && len(names) == 0 {
 		if len(installed) == 0 {
 			fmt.Fprintln(stdout, noSkillsMsg(opts))
@@ -536,27 +526,17 @@ func runRemove(skillNames []string, opts RemoveOptions, cwd string, stdout, stde
 			fmt.Fprintln(stderr, FormatError(ErrPromptRequiresTTY()))
 			return 1
 		}
-		fmt.Fprintln(stdout, "Installed skills:")
+		choices := make([]PromptOption, len(installed))
 		for i, n := range installed {
-			fmt.Fprintf(stdout, "  %d) %s\n", i+1, n)
+			choices[i] = PromptOption{Value: n, Label: n}
 		}
-		line, ok := promptLine(reader, stdout, "Select skills to remove (comma-separated numbers, e.g. 1,3): ")
-		if !ok || line == "" {
+		picked, err := prompt.MultiSelect(MultiSelectOptions{
+			Message: "Select skills to remove " + prompt.paint("(space to toggle)", sgrDim),
+			Options: choices,
+		})
+		if err != nil {
 			fmt.Fprintln(stdout, "Removal cancelled")
 			return 0
-		}
-		var picked []string
-		for _, part := range strings.Split(line, ",") {
-			part = strings.TrimSpace(part)
-			if part == "" {
-				continue
-			}
-			idx, convErr := strconv.Atoi(part)
-			if convErr != nil || idx < 1 || idx > len(installed) {
-				fmt.Fprintf(stderr, "Invalid selection: %q\n", part)
-				return 1
-			}
-			picked = append(picked, installed[idx-1])
 		}
 		selected = ResolveSkillsToRemove(picked, installed, lockKeys, nil)
 	}
@@ -583,8 +563,8 @@ func runRemove(skillNames []string, opts RemoveOptions, cwd string, stdout, stde
 			fmt.Fprintf(stdout, "  %s•%s %s\n", ansiRed, ansiReset, s)
 		}
 		fmt.Fprintln(stdout)
-		ans, ok := promptLine(reader, stdout, fmt.Sprintf("Are you sure you want to uninstall %d skill(s)? (y/N) ", len(selected)))
-		if !ok || !(strings.EqualFold(ans, "y") || strings.EqualFold(ans, "yes")) {
+		message := fmt.Sprintf("Are you sure you want to uninstall %d skill(s)?", len(selected))
+		if !confirmOrLine(prompt, reader, message) {
 			fmt.Fprintln(stdout, "Removal cancelled")
 			return 0
 		}

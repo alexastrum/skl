@@ -104,14 +104,6 @@ func TestDetectAgent_AllHeuristicsAndMappings(t *testing.T) {
 			wantMappedOk: true,
 		},
 		{
-			name:         "Antigravity CLI via ANTIGRAVITY_CLI_ALIAS",
-			env:          map[string]string{"ANTIGRAVITY_CLI_ALIAS": "agy"},
-			wantIsAgent:  true,
-			wantName:     "antigravity-cli",
-			wantType:     "antigravity-cli",
-			wantMappedOk: true,
-		},
-		{
 			name:         "Augment via AUGMENT_AGENT",
 			env:          map[string]string{"AUGMENT_AGENT": "1"},
 			wantIsAgent:  true,
@@ -199,7 +191,7 @@ func TestDetectAgent_AllHeuristicsAndMappings(t *testing.T) {
 func TestDetectAgent_LiveProcessEnvAndCI(t *testing.T) {
 	// Scrub all agent detection env vars via t.Setenv
 	vars := []string{
-		"AI_AGENT", "ANTIGRAVITY_AGENT", "ANTIGRAVITY_CLI_ALIAS", "AUGMENT_AGENT",
+		"AI_AGENT", "ANTIGRAVITY_AGENT", "AUGMENT_AGENT",
 		"CLAUDE_CODE", "CLAUDE_CODE_IS_COWORK", "CLAUDECODE",
 		"CODEX_CI", "CODEX_SANDBOX", "CODEX_THREAD_ID",
 		"COPILOT_ALLOW_ALL", "COPILOT_GITHUB_TOKEN", "COPILOT_MODEL",

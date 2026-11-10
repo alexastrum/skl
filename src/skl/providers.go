@@ -1018,11 +1018,14 @@ func GetPluginSkillPaths(basePath string) []string {
 }
 
 // GetPluginGroupings maps absolute skill dirs to their declaring plugin name.
+// Names come from repository manifests and are shown in prompts and listings,
+// so they are sanitized of terminal escapes.
 func GetPluginGroupings(basePath string) map[string]string {
 	groups := map[string]string{}
 	if m, root, ok := readMarketplace(basePath); ok {
 		for _, p := range m.Plugins {
-			if p.Name == "" {
+			name := SanitizeMetadata(p.Name)
+			if name == "" {
 				continue
 			}
 			src, has, local := p.pluginSource()
@@ -1040,13 +1043,14 @@ func GetPluginGroupings(basePath string) map[string]string {
 				dir := filepath.Join(pluginBase, filepath.FromSlash(sp))
 				if fpIsPathWithin(basePath, dir) {
 					if abs, err := filepath.Abs(dir); err == nil {
-						groups[filepath.Clean(abs)] = p.Name
+						groups[filepath.Clean(abs)] = name
 					}
 				}
 			}
 		}
 	}
-	if m, ok := readPluginJSON(basePath); ok && m.Name != "" {
+	if m, ok := readPluginJSON(basePath); ok && SanitizeMetadata(m.Name) != "" {
+		name := SanitizeMetadata(m.Name)
 		for _, sp := range m.Skills {
 			if !strings.HasPrefix(sp, "./") {
 				continue
@@ -1054,7 +1058,7 @@ func GetPluginGroupings(basePath string) map[string]string {
 			dir := filepath.Join(basePath, filepath.FromSlash(sp))
 			if fpIsPathWithin(basePath, dir) {
 				if abs, err := filepath.Abs(dir); err == nil {
-					groups[filepath.Clean(abs)] = m.Name
+					groups[filepath.Clean(abs)] = name
 				}
 			}
 		}
@@ -1862,7 +1866,8 @@ func hasCompleteNestedSnapshot(tree *RepoTree, skillMdPath string, files []Skill
 // fpComputeSnapshotHash hashes sorted path+contents (matches ComputeSkillFolderHash).
 func fpComputeSnapshotHash(files []SkillSnapshotFile) string {
 	sorted := append([]SkillSnapshotFile{}, files...)
-	sort.SliceStable(sorted, func(i, j int) bool { return jsLocaleCompare(sorted[i].Path, sorted[j].Path) < 0 })
+	coll := newLocaleCollator()
+	sort.SliceStable(sorted, func(i, j int) bool { return localePathCompare(coll, sorted[i].Path, sorted[j].Path) < 0 })
 	h := sha256.New()
 	for _, f := range sorted {
 		h.Write([]byte(f.Path))
@@ -2184,6 +2189,13 @@ func fpUTF16Len(s string) int {
 }
 
 func fetchWellKnownCandidates(baseURL string) []wellKnownCandidate {
+	return fetchWellKnownCandidatesWithHeaders(baseURL, nil)
+}
+
+// fetchWellKnownCandidatesWithHeaders is fetchWellKnownCandidates sending extra
+// request headers (upstream fetchIndexCandidates options, e.g. the update
+// check's X-Skills-Update-Check).
+func fetchWellKnownCandidatesWithHeaders(baseURL string, headers map[string]string) []wellKnownCandidate {
 	pu, err := url.Parse(baseURL)
 	if err != nil || pu.Host == "" {
 		return nil
@@ -2202,7 +2214,7 @@ func fetchWellKnownCandidates(baseURL string) []wellKnownCandidate {
 	defer cancel()
 	var out []wellKnownCandidate
 	for _, t := range tries {
-		resp, err := providerGet(ctx, t.indexURL, nil)
+		resp, err := providerGet(ctx, t.indexURL, headers)
 		if err != nil {
 			continue
 		}

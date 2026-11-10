@@ -890,8 +890,9 @@ func TestRunAdd_InteractivePrompts(t *testing.T) {
 	addStub(t, func(req SourceRequest) (*FetchedSource, error) { return addFakeLocalFetch(t, src), nil })
 	var out, errb bytes.Buffer
 	yes := true
-	// skills: pick 2 (beta); scope: project (default); confirm: yes.
-	code := RunAddWithIO([]string{src, "-a", "codex"}, AddIO{Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("2\n\ny\n"), Cwd: cwd, Interactive: &yes})
+	// skills: down past Select All and alpha, space on beta, enter; scope: enter
+	// (Project); confirm: enter (Yes).
+	code := RunAddWithIO([]string{src, "-a", "codex"}, AddIO{Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("\x1b[B\x1b[B \r\r\r"), Cwd: cwd, Interactive: &yes})
 	if code != 0 {
 		t.Fatalf("code=%d out=%s err=%s", code, out.String(), errb.String())
 	}

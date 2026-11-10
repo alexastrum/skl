@@ -1,6 +1,6 @@
 # skl: Agent Skills CLI Manager
 
-`skl` is a fast, dependency-free CLI tool for managing Agent Skills, written in Go.
+`skl` is a fast, self-contained CLI tool for managing Agent Skills, written in Go.
 
 This project is a Go port of the original [`skills`](https://www.npmjs.com/package/skills) TypeScript package (commonly run via `npx skills`). It tracks upstream [vercel-labs/skills](https://github.com/vercel-labs/skills) v1.7.6 command for command and flag for flag. The skl version mirrors the upstream release it tracks, with the major version set to 0: skills 1.7.6 is skl 0.7.6. It is a single static binary, so there is no `node_modules` to audit and no NPM supply chain to worry about.
 
@@ -10,15 +10,15 @@ TypeScript is great in the browser, but Node.js is a drag for CLI tools. You get
 
 I could have used Rust, but it felt like overkill. Rust is great for high-concurrency kernels or safety-critical engines, but fighting a borrow checker and managing lifetime annotations adds too much friction for a simple symlinking tool. Go strikes the perfect balance: it compiles in less than a second, has a rich standard library, and lets me write straightforward, synchronous code without importing half of crates.io.
 
-### Zero dependencies
-The Go version is written against the standard library. The one exception is `yaml.v3`, which parses `SKILL.md` frontmatter. The binary needs nothing else on the machine. `git` is only used when you install from a git source, and GitHub sources can fall back to a ZIP download with `-y` when `git` is missing.
+### Four dependencies
+The Go version uses the standard library plus four modules. `yaml.v3` parses `SKILL.md` frontmatter. `golang.org/x/text` sorts file paths by Unicode collation, the same kind of ordering Node's `localeCompare` uses, so skl computes the same lock file hashes as upstream for ASCII paths and for most others ([AGENTS.md](AGENTS.md) lists the known differences). `golang.org/x/term` switches the terminal to raw mode so the interactive pickers can read arrow keys. `golang.org/x/sys` provides the system calls under it, and the ones that create Windows directory junctions. All four modules compile into the binary, and the binary needs nothing else on the machine. `git` is only used when you install from a git source, and GitHub sources can fall back to a ZIP download with `-y` when `git` is missing.
 
 The upstream CLI at v1.7.6 declares two runtime dependencies (`tar` and `yaml`, 7 packages once resolved) on top of the Node runtime itself, and its lock file lists 156 packages for development.
 
 ### A smaller footprint to ship
 The source is about the same size as the TypeScript CLI, since it ports it feature for feature. The difference is in what you ship:
 *   Original TypeScript (v1.7.6): 17,205 lines of source across 41 files, plus Node.js and the `node_modules` folder.
-*   Go port (`skl`): 17,427 lines of source across 22 files, compiling to one 11.8MB static binary (linux/amd64, Go 1.26).
+*   Go port (`skl`): 19,971 lines of source across 31 files, compiling to one 13.8MB static binary (linux/amd64, Go 1.26). Of that, `golang.org/x/text` adds 1.7MB.
 
 Flat, synchronous Go code with error values instead of async task wrappers fits in about half as many files.
 

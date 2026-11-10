@@ -5,7 +5,6 @@ package skl
 // --json output. AddSkill remains as the backward-compatible programmatic API.
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -15,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -403,108 +401,65 @@ func DownloadSkillPath(rootDir, skillDir string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Prompts (line based; upstream uses clack multiselects).
+// Prompts (the widgets live in prompt*.go).
 // ---------------------------------------------------------------------------
 
-var errPromptCancelled = errors.New("installation cancelled")
-
-type addPrompter struct {
-	in          *bufio.Reader
-	out         io.Writer
-	interactive bool
+// addSkillHint shortens a description to upstream's 60-column prompt hint.
+func addSkillHint(desc string) string {
+	r := []rune(desc)
+	if len(r) > 60 {
+		return string(r[:57]) + "…"
+	}
+	return desc
 }
 
-func (p *addPrompter) ask(question string) (string, error) {
-	if !p.interactive {
-		return "", ErrPromptRequiresTTY()
-	}
-	fmt.Fprint(p.out, question)
-	line, err := p.in.ReadString('\n')
-	if err != nil && line == "" {
-		return "", errPromptCancelled
-	}
-	return strings.TrimSpace(line), nil
-}
-
-func (p *addPrompter) confirm(question string, def bool) (bool, error) {
-	suffix := " [y/N]: "
-	if def {
-		suffix = " [Y/n]: "
-	}
-	ans, err := p.ask(question + suffix)
-	if err != nil {
-		return false, err
-	}
-	switch strings.ToLower(ans) {
-	case "":
-		return def, nil
-	case "y", "yes":
-		return true, nil
-	default:
-		return false, nil
-	}
-}
-
-// choose prints a numbered list and reads a selection (numbers or values, comma separated,
-// '*' for all). Empty input selects defaults.
-func (p *addPrompter) choose(title string, labels []string, values []string, defaults []int, multi bool) ([]int, error) {
-	if !p.interactive {
-		return nil, ErrPromptRequiresTTY()
-	}
-	fmt.Fprintln(p.out, title)
-	for i, l := range labels {
-		mark := " "
-		for _, d := range defaults {
-			if d == i {
-				mark = "*"
+// addSelectSkills asks which skills to install. Well-known sources get upstream's
+// flat list with description hints (skills.sh packs start fully selected); other
+// sources get the grouped list with a description pane.
+func addSelectSkills(t *promptTerm, sorted []FetchedSkill, wellKnown, pack bool) ([]FetchedSkill, error) {
+	items := make([]SearchItem, len(sorted))
+	opts := SearchMultiSelectOptions{Message: "Select skills to install", Required: true, MaxVisible: 20, SelectAll: true}
+	if wellKnown {
+		for i, s := range sorted {
+			items[i] = SearchItem{Label: addSkillName(s.Skill), Hint: addSkillHint(s.Description)}
+			if pack {
+				opts.Initial = append(opts.Initial, i)
 			}
 		}
-		fmt.Fprintf(p.out, "  %s %2d) %s\n", mark, i+1, l)
-	}
-	hint := "Enter a number"
-	if multi {
-		hint = "Enter numbers or names separated by commas ('*' for all)"
-	}
-	for attempt := 0; attempt < 3; attempt++ {
-		ans, err := p.ask(hint + ": ")
-		if err != nil {
-			return nil, err
-		}
-		if ans == "" && len(defaults) > 0 {
-			return defaults, nil
-		}
-		if multi && ans == "*" {
-			all := make([]int, len(labels))
-			for i := range all {
-				all[i] = i
+	} else {
+		hasGroups := false
+		for _, s := range sorted {
+			if s.PluginName != "" {
+				hasGroups = true
 			}
-			return all, nil
 		}
-		var picked []int
-		ok := true
-		for _, tok := range addSplitCommas(ans) {
-			if n, err := strconv.Atoi(tok); err == nil && n >= 1 && n <= len(labels) {
-				picked = append(picked, n-1)
-				continue
-			}
-			found := false
-			for i, v := range values {
-				if strings.EqualFold(v, tok) || strings.EqualFold(labels[i], tok) {
-					picked = append(picked, i)
-					found = true
-					break
+		for i, s := range sorted {
+			items[i] = SearchItem{Label: addSkillName(s.Skill), Detail: s.Description}
+			if hasGroups {
+				items[i].Group = "Other"
+				if s.PluginName != "" {
+					items[i].Group = addKebabToTitle(s.PluginName)
 				}
 			}
-			if !found {
-				ok = false
-			}
 		}
-		if ok && len(picked) > 0 && (multi || len(picked) == 1) {
-			return picked, nil
+		if hasGroups {
+			opts.Message += " " + t.paint("(space to toggle)", sgrDim)
 		}
-		fmt.Fprintln(p.out, "Invalid selection.")
+		opts.NoSearch = hasGroups
+		opts.ShowDetail = true
+		opts.HideSelectedSummary = true
+		opts.SelectGroups = hasGroups
 	}
-	return nil, errPromptCancelled
+	opts.Items = items
+	idx, err := t.SearchMultiSelect(opts)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FetchedSkill, len(idx))
+	for i, k := range idx {
+		out[i] = sorted[k]
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1039,7 +994,7 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 	if r.json {
 		r.out = aio.Stderr
 	}
-	prompt := &addPrompter{in: bufio.NewReader(aio.Stdin), out: r.out, interactive: interactive}
+	prompt := newPromptTerm(aio.Stdin, r.out, interactive)
 	opts := p.Options
 	explicit := map[AgentType]bool{}
 	for a := range p.ExplicitAgentSet {
@@ -1208,31 +1163,20 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 		selected = skills
 	default:
 		sorted := append([]FetchedSkill{}, skills...)
+		coll := newLocaleCollator()
 		sort.SliceStable(sorted, func(i, j int) bool {
 			a, b := sorted[i], sorted[j]
 			if (a.PluginName != "") != (b.PluginName != "") {
 				return a.PluginName != ""
 			}
 			if a.PluginName != b.PluginName {
-				return jsLocaleCompare(a.PluginName, b.PluginName) < 0
+				return coll.CompareString(a.PluginName, b.PluginName) < 0
 			}
-			return jsLocaleCompare(addSkillName(a.Skill), addSkillName(b.Skill)) < 0
+			return coll.CompareString(addSkillName(a.Skill), addSkillName(b.Skill)) < 0
 		})
-		labels := make([]string, len(sorted))
-		values := make([]string, len(sorted))
-		for i, s := range sorted {
-			values[i] = addSkillName(s.Skill)
-			labels[i] = values[i]
-			if s.Description != "" {
-				labels[i] += " - " + s.Description
-			}
-		}
-		idx, err := prompt.choose("Select skills to install", labels, values, nil, true)
+		selected, err = addSelectSkills(prompt, sorted, fetched.SourceType == SourceTypeWellKnown, IsSkillsShPackURL(parsed.URL))
 		if err != nil {
 			return r.cancelled(err)
-		}
-		for _, i := range idx {
-			selected = append(selected, sorted[i])
 		}
 	}
 
@@ -1255,7 +1199,7 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 		case addHasAgent(installed, "eve") && (opts.Yes || !det.IsAgent):
 			useEve := true
 			if !opts.Yes {
-				useEve, err = prompt.confirm(fmt.Sprintf("Detected an eve project. Install %s for your eve agent to use?", addFormatList(addUnitNames(units), 3)), true)
+				useEve, err = prompt.Confirm(ConfirmOptions{Message: fmt.Sprintf("Detected an eve project. Install %s for your eve agent to use?", addFormatList(addUnitNames(units), 3))})
 				if err != nil {
 					return r.cancelled(err)
 				}
@@ -1276,20 +1220,20 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 			}
 		case len(installed) == 0:
 			if !r.json {
-				maybeSuggestAgyTo(r.out, prompt.in, opts, interactive)
+				maybeSuggestAgyTo(r.out, prompt, opts, interactive)
 			}
 			if opts.Yes {
 				targetAgents = addAllAgents()
 				fmt.Fprintln(r.out, "Installing to all agents")
 			} else {
-				targetAgents, err = addSelectAgents(prompt, opts.Global)
+				fmt.Fprintln(r.out, "Select agents to install skills to")
+				targetAgents, err = addPromptForAgents(prompt)
 				if err != nil {
 					return r.cancelled(err)
 				}
 				for _, a := range targetAgents {
 					explicit[a] = true
 				}
-				_ = SaveSelectedAgents(addAgentStrings(targetAgents))
 			}
 		case len(installed) == 1 || opts.Yes:
 			targetAgents = addEnsureUniversal(installed)
@@ -1302,7 +1246,6 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 			for _, a := range targetAgents {
 				explicit[a] = true
 			}
-			_ = SaveSelectedAgents(addAgentStrings(targetAgents))
 		}
 	}
 
@@ -1324,20 +1267,15 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 				eveSubagents = append(eveSubagents, s)
 			}
 		} else if len(available) > 0 && !opts.Yes {
-			labels := append([]string{"Root agent (agent/skills)"}, available...)
-			values := append([]string{"root"}, available...)
-			idx, err := prompt.choose("Where should Eve skills be installed?", labels, values, []int{0}, true)
+			choices := []PromptOption{{Value: "", Label: "Root agent", Hint: "agent/skills"}}
+			for _, name := range available {
+				choices = append(choices, PromptOption{Value: name, Label: name, Hint: "agent/subagents/" + name + "/skills"})
+			}
+			picked, err := prompt.MultiSelect(MultiSelectOptions{Message: "Where should Eve skills be installed?", Options: choices, Initial: []string{""}})
 			if err != nil {
 				return r.cancelled(err)
 			}
-			eveSubagents = nil
-			for _, i := range idx {
-				if i == 0 {
-					eveSubagents = append(eveSubagents, "")
-				} else {
-					eveSubagents = append(eveSubagents, available[i-1])
-				}
-			}
+			eveSubagents = picked
 		}
 	}
 
@@ -1349,14 +1287,14 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 		}
 	}
 	if !p.ScopeExplicit && !opts.Yes && supportsGlobal {
-		idx, err := prompt.choose("Installation scope", []string{
-			"Project (install in current directory, committed with your project)",
-			"Global (install in home directory, available across all projects)",
-		}, []string{"project", "global"}, []int{0}, false)
+		scope, err := prompt.Select(SelectOptions{Message: "Installation scope", Options: []PromptOption{
+			{Value: "project", Label: "Project", Hint: "Install in current directory (committed with your project)"},
+			{Value: "global", Label: "Global", Hint: "Install in home directory (available across all projects)"},
+		}})
 		if err != nil {
 			return r.cancelled(err)
 		}
-		global = idx[0] == 1
+		global = scope == "global"
 	}
 
 	targetAgents = SkipAgentsWithoutGlobalDir(targetAgents, global, len(p.ExplicitAgentSet) > 0, r.out)
@@ -1384,14 +1322,14 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 		mode = InstallModeCopy
 	}
 	if !opts.Copy && !opts.Yes && mode == InstallModeSymlink {
-		idx, err := prompt.choose("Installation method", []string{
-			"Symlink (Recommended): single source of truth, easy updates",
-			"Copy to all agents: independent copies for each agent",
-		}, []string{"symlink", "copy"}, []int{0}, false)
+		choice, err := prompt.Select(SelectOptions{Message: "Installation method", Options: []PromptOption{
+			{Value: "symlink", Label: "Symlink (Recommended)", Hint: "Single source of truth, easy updates"},
+			{Value: "copy", Label: "Copy to all agents", Hint: "Independent copies for each agent"},
+		}})
 		if err != nil {
 			return r.cancelled(err)
 		}
-		if idx[0] == 1 {
+		if choice == "copy" {
 			mode = InstallModeCopy
 		}
 	}
@@ -1411,12 +1349,12 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 	addPrintSummary(r.out, plan)
 
 	if !opts.Yes {
-		ok, err := prompt.confirm("Proceed with installation?", true)
+		ok, err := prompt.Confirm(ConfirmOptions{Message: "Proceed with installation?"})
 		if err != nil {
 			return r.cancelled(err)
 		}
 		if !ok {
-			return r.cancelled(errPromptCancelled)
+			return r.cancelled(ErrPromptCancel)
 		}
 	}
 
@@ -1576,57 +1514,111 @@ func addSourceLine(p ParsedSource) string {
 	return line
 }
 
-// addSelectAgents prompts for target agents (universal agents are always included).
-func addSelectAgents(p *addPrompter, global bool) ([]AgentType, error) {
+// addSelectAgents is upstream selectAgentsInteractive: universal agents are a
+// locked section and the others are selectable, preselected from the last run.
+// The selection (locked agents included) is saved for next time.
+func addSelectAgents(t *promptTerm, global bool) ([]AgentType, error) {
 	supports := func(a AgentType) bool {
 		cfg, ok := Agents[a]
 		return ok && (!global || cfg.GlobalSkillsDir != "")
 	}
-	var universal []AgentType
+	var universal, visible, others []AgentType
 	for _, a := range GetUniversalAgents() {
 		if supports(a) {
 			universal = append(universal, a)
 		}
 	}
-	var others []AgentType
+	for _, a := range GetVisibleUniversalAgents() {
+		if supports(a) {
+			visible = append(visible, a)
+		}
+	}
 	for _, a := range GetNonUniversalAgents() {
 		if a != "eve" && a != AgentUniversal && supports(a) {
 			others = append(others, a)
 		}
 	}
-	if !p.interactive {
+	if !t.interactive {
 		return nil, ErrPromptRequiresTTY()
 	}
-	fmt.Fprintf(p.out, "Universal (.agents/skills), always included: %s\n", addFormatList(agentLabels(universal), 8))
-	labels := make([]string, len(others))
-	values := make([]string, len(others))
+	locked := &LockedSection{Title: "Universal (.agents/skills)", HiddenCount: len(universal) - len(visible)}
+	for _, a := range visible {
+		locked.Items = append(locked.Items, SearchItem{Value: string(a), Label: Agents[a].DisplayName})
+	}
+	items := make([]SearchItem, len(others))
 	for i, a := range others {
 		cfg := Agents[a]
 		hint := cfg.SkillsDir
 		if global {
 			hint = cfg.GlobalSkillsDir
 		}
-		labels[i] = fmt.Sprintf("%s (%s)", cfg.DisplayName, hint)
-		values[i] = string(a)
+		items[i] = SearchItem{Value: string(a), Label: cfg.DisplayName, Hint: hint}
 	}
-	var defaults []int
+	var initial []int
 	if last, err := GetLastSelectedAgents(); err == nil {
-		for _, l := range last {
-			for i, v := range values {
-				if v == l {
-					defaults = append(defaults, i)
-				}
+		for i, a := range others {
+			if addHasString(last, string(a)) && !addHasAgent(universal, a) {
+				initial = append(initial, i)
 			}
 		}
 	}
-	idx, err := p.choose("Which agents do you want to install to?", labels, values, defaults, true)
+	idx, err := t.SearchMultiSelect(SearchMultiSelectOptions{
+		Message: "Which agents do you want to install to?", Items: items, Initial: initial, Locked: locked,
+	})
 	if err != nil {
 		return nil, err
 	}
-	selected := append([]AgentType{}, universal...)
+	selected := append([]AgentType{}, visible...)
 	for _, i := range idx {
 		selected = append(selected, others[i])
 	}
+	_ = SaveSelectedAgents(addAgentStrings(selected))
+	return selected, nil
+}
+
+// addPromptForAgents is upstream promptForAgents, used when no agents are
+// detected: every agent but eve, preselecting the last choice or upstream's
+// defaults. At least one agent is required, and the choice is saved.
+func addPromptForAgents(t *promptTerm) ([]AgentType, error) {
+	var choices []AgentType
+	for _, a := range orderedAgentTypes(Agents) {
+		if a != "eve" {
+			choices = append(choices, a)
+		}
+	}
+	items := make([]SearchItem, len(choices))
+	for i, a := range choices {
+		items[i] = SearchItem{Value: string(a), Label: Agents[a].DisplayName}
+	}
+	pick := func(names []string) []int {
+		var out []int
+		for _, n := range names {
+			for i, a := range choices {
+				if string(a) == n {
+					out = append(out, i)
+				}
+			}
+		}
+		return out
+	}
+	var initial []int
+	if last, err := GetLastSelectedAgents(); err == nil {
+		initial = pick(last)
+	}
+	if len(initial) == 0 {
+		initial = pick([]string{"claude-code", "opencode", "codex", "grok"})
+	}
+	idx, err := t.SearchMultiSelect(SearchMultiSelectOptions{
+		Message: "Which agents do you want to install to?", Items: items, Initial: initial, Required: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	selected := make([]AgentType, len(idx))
+	for i, k := range idx {
+		selected[i] = choices[k]
+	}
+	_ = SaveSelectedAgents(addAgentStrings(selected))
 	return selected, nil
 }
 
