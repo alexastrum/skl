@@ -11,9 +11,14 @@ import (
 	"github.com/alexastrum/skl/src/skl"
 )
 
-// version is the CLI version (compatible with skills 1.7.6). It is a var so
-// release builds can set it with -ldflags "-X main.version=...".
-var version = "1.7.6"
+// upstreamVersion is the vercel-labs/skills release that skl tracks.
+const upstreamVersion = "1.7.6"
+
+// version is the skl version. It mirrors upstreamVersion with the major
+// version set to 0 (skills 1.7.6 -> skl 0.7.6); TestVersionMirrorsUpstream
+// enforces this. It is a var so release builds can set it with
+// -ldflags "-X main.version=...".
+var version = "0.7.6"
 
 const (
 	reset = "\x1b[0m"

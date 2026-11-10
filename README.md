@@ -2,7 +2,7 @@
 
 `skl` is a fast, dependency-free CLI tool for managing Agent Skills, written in Go.
 
-This project is a Go port of the original [`skills`](https://www.npmjs.com/package/skills) TypeScript package (commonly run via `npx skills`). It tracks upstream [vercel-labs/skills](https://github.com/vercel-labs/skills) v1.7.6 command for command and flag for flag, and `skl --version` prints that upstream version. It is a single static binary, so there is no `node_modules` to audit and no NPM supply chain to worry about.
+This project is a Go port of the original [`skills`](https://www.npmjs.com/package/skills) TypeScript package (commonly run via `npx skills`). It tracks upstream [vercel-labs/skills](https://github.com/vercel-labs/skills) v1.7.6 command for command and flag for flag. The skl version mirrors the upstream release it tracks, with the major version set to 0: skills 1.7.6 is skl 0.7.6. It is a single static binary, so there is no `node_modules` to audit and no NPM supply chain to worry about.
 
 ## Why Go?
 

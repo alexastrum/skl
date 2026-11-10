@@ -2,7 +2,7 @@
 
 `skl` supports 79 agent environments (see `AllAgentTypes` in `src/skl/types.go`). It evaluates the local filesystem and environment variables to detect installed agents, routing and linking skills dynamically.
 
-We track the original TypeScript `skills` npm package (vercel-labs/skills v1.7.6) command for command, flag for flag, and platform for platform. `skl --version` prints the upstream version it tracks. The intentional divergences are listed at the end of this file; everything else should match upstream byte for byte where output is compared (lockfiles, diagnostics, `--json`).
+We track the original TypeScript `skills` npm package (vercel-labs/skills v1.7.6) command for command, flag for flag, and platform for platform. The skl version mirrors the tracked upstream release with the major version set to 0 (skills 1.7.6 is skl 0.7.6). When you sync with a new upstream release, bump both `upstreamVersion` and `version` in `main.go`; `TestVersionMirrorsUpstream` fails if they drift. The intentional divergences are listed at the end of this file; everything else should match upstream byte for byte where output is compared (lockfiles, diagnostics, `--json`).
 
 ### Antigravity mapping
 

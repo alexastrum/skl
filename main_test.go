@@ -78,14 +78,27 @@ func writeSkill(t *testing.T, dir, name string) {
 func TestVersion(t *testing.T) {
 	for _, flag := range []string{"--version", "-v", "version"} {
 		r := runCLI(t, t.TempDir(), nil, flag)
-		if r.code != 0 || r.stdout != "1.7.6\n" {
+		if r.code != 0 || r.stdout != "0.7.6\n" {
 			t.Errorf("%s: code=%d stdout=%q", flag, r.code, r.stdout)
 		}
 	}
 	// -v after a subcommand means --verbose, not version.
 	r := runCLI(t, t.TempDir(), nil, "update", "-v", "-p", "-y")
-	if strings.TrimSpace(r.stdout) == "1.7.6" {
+	if strings.TrimSpace(r.stdout) == "0.7.6" {
 		t.Error("update -v must not print the version")
+	}
+}
+
+// TestVersionMirrorsUpstream keeps the skl version in step with the tracked
+// upstream release: skills 1.X.Y maps to skl 0.X.Y. When syncing with a new
+// upstream release, bump both upstreamVersion and version.
+func TestVersionMirrorsUpstream(t *testing.T) {
+	major, rest, ok := strings.Cut(upstreamVersion, ".")
+	if !ok || major != "1" {
+		t.Fatalf("upstreamVersion %q: expected a 1.x.y release; revisit the version mapping", upstreamVersion)
+	}
+	if want := "0." + rest; version != want {
+		t.Errorf("version = %q, want %q (mirrors upstream %s)", version, want, upstreamVersion)
 	}
 }
 
