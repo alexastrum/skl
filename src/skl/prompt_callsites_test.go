@@ -15,6 +15,9 @@ import (
 
 func withStdinTTY(t *testing.T, tty bool) {
 	t.Helper()
+	// Ensure Unicode symbols are enabled on Windows too after lcHermetic clears CI,
+	// matching instTestEnv/testTerm so Unicode symbol assertions are OS-independent.
+	t.Setenv("WT_SESSION", "1")
 	orig := stdinIsTTY
 	stdinIsTTY = func() bool { return tty }
 	t.Cleanup(func() { stdinIsTTY = orig })

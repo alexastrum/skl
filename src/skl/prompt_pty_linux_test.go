@@ -68,18 +68,30 @@ func drainPty(master *os.File) *ptyOutput {
 
 func (o *ptyOutput) waitFor(t *testing.T, s string) {
 	t.Helper()
+	o.waitMatch(t, s, false)
+}
+
+func (o *ptyOutput) waitForPlain(t *testing.T, s string) {
+	t.Helper()
+	o.waitMatch(t, s, true)
+}
+
+func (o *ptyOutput) waitMatch(t *testing.T, s string, strip bool) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		o.mu.Lock()
-		ok := strings.Contains(o.b.String(), s)
+		raw := o.b.String()
 		o.mu.Unlock()
-		if ok {
+		hay := raw
+		if strip {
+			hay = StripTerminalEscapes(raw)
+		}
+		if strings.Contains(hay, s) {
 			return
 		}
 		if time.Now().After(deadline) {
-			o.mu.Lock()
-			defer o.mu.Unlock()
-			t.Fatalf("timed out waiting for %q in %q", s, o.b.String())
+			t.Fatalf("timed out waiting for %q in %q", s, raw)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -125,7 +137,9 @@ func TestPtyConfirmRawModeAndRestore(t *testing.T) {
 	_, _ = master.Write([]byte("\x1b"))
 	time.Sleep(10 * time.Millisecond)
 	_, _ = master.Write([]byte("[C"))
-	out.waitFor(t, "● No")
+	// Note: ansiGreen("●") + " No" puts "\x1b[39m" between "●" and " No", so
+	// waitFor checks the plain-stripped buffer.
+	out.waitForPlain(t, "● No")
 	_, _ = master.Write([]byte("\r"))
 	r := <-done
 	if r.err != nil || r.ok {
