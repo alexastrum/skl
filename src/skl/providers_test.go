@@ -87,12 +87,15 @@ func provQuiet(t *testing.T) {
 	t.Cleanup(func() { skillWarningWriter = old })
 }
 
-// provIsolate points TMPDIR at a fresh dir and clears env knobs that would
-// change provider behavior. Returns the TMPDIR path.
+// provIsolate points the OS temp dir at a fresh dir and clears env knobs that
+// would change provider behavior. os.TempDir reads TMPDIR on Unix and TMP/TEMP
+// on Windows, so all three are set. Returns the temp dir path.
 func provIsolate(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
-	t.Setenv("TMPDIR", tmp)
+	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(k, tmp)
+	}
 	for _, k := range []string{"INSTALL_INTERNAL_SKILLS", "SKILLS_DOWNLOAD_MAX_BYTES", "SKILLS_EXTRACT_MAX_BYTES",
 		"SKILLS_EXTRACT_MAX_FILES", "GITHUB_TOKEN", "GH_TOKEN", "SKILLS_DOWNLOAD_URL"} {
 		t.Setenv(k, "")
@@ -519,6 +522,10 @@ func TestExtractTarArchiveGzipAndPlain(t *testing.T) {
 			st, err := os.Stat(filepath.Join(dest, "pkg", name))
 			if err != nil {
 				t.Fatal(err)
+			}
+			// Windows has no exec bit, so only the existence check applies there.
+			if runtime.GOOS == "windows" {
+				continue
 			}
 			if st.Mode().Perm() != want || st.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
 				t.Fatalf("gz=%v: %s mode = %v, want %v", gz, name, st.Mode(), want)

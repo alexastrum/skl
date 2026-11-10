@@ -444,7 +444,28 @@ func TestAddSkill_Symlink(t *testing.T) {
 		t.Fatalf("failed to read link: %v", err)
 	}
 
-	// Target should point to "../../.agents/skills/symlink-skill" or similar relative path
+	// On Windows the installer creates a junction, whose target is always an
+	// absolute path (upstream's "junction" symlink type); it must resolve to the
+	// canonical folder. Elsewhere the target is relative:
+	// "../../.agents/skills/symlink-skill".
+	if runtime.GOOS == "windows" {
+		if !filepath.IsAbs(target) {
+			t.Fatalf("expected absolute junction target on Windows, got %q", target)
+		}
+		canonicalDir := filepath.Join(tmpDir, ".agents", "skills", "symlink-skill")
+		wantInfo, err := os.Stat(canonicalDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotInfo, err := os.Stat(target)
+		if err != nil {
+			t.Fatalf("junction target %q does not resolve: %v", target, err)
+		}
+		if !os.SameFile(gotInfo, wantInfo) {
+			t.Errorf("junction target %q does not resolve to canonical dir %q", target, canonicalDir)
+		}
+		return
+	}
 	expectedTarget := filepath.Join("..", "..", ".agents", "skills", "symlink-skill")
 	if filepath.Clean(target) != filepath.Clean(expectedTarget) {
 		t.Errorf("expected link target to be %q, got %q", expectedTarget, target)

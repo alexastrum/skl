@@ -756,7 +756,9 @@ func TestCleanupTempDirConfinement(t *testing.T) {
 	if err := os.MkdirAll(tmpRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("TMPDIR", tmpRoot)
+	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(k, tmpRoot)
+	}
 	if err := os.Symlink(outside, filepath.Join(tmpRoot, "link")); err != nil {
 		t.Fatal(err)
 	}

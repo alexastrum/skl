@@ -2,6 +2,7 @@ package skl
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -396,6 +397,12 @@ func TestComputeSkillFolderHashUsesLocaleOrder(t *testing.T) {
 		name  string
 		files map[string]string
 		want  string
+		// order, when set, is the expected hash input order of files.
+		order []string
+		// caseOnly marks fixtures with paths that differ only by case. They
+		// collide on case-insensitive filesystems (APFS, NTFS), so the on-disk
+		// check is skipped there; the in-memory check still runs everywhere.
+		caseOnly bool
 	}{
 		{
 			name:  "lowercase subdirectory sorts before SKILL.md",
@@ -414,10 +421,42 @@ func TestComputeSkillFolderHashUsesLocaleOrder(t *testing.T) {
 			files: map[string]string{"SKILL.md": "# s\n", "Scripts/a.sh": "x", "scripts/b.sh": "y",
 				"assets/10.txt": "t", "assets/9.txt": "n", "assets/A.txt": "u", "~notes.md": "z"},
 			want: "f2b84886401697e26395c04b2cfe4d6a64a4766991d171c3024946df6231ecc4",
+			order: []string{"~notes.md", "assets/10.txt", "assets/9.txt", "assets/A.txt",
+				"Scripts/a.sh", "scripts/b.sh", "SKILL.md"},
+			caseOnly: true,
 		},
 	}
+	caseInsensitive := isCaseInsensitiveFS(t)
 	for _, tt := range tests {
+		// In memory: sort with the same comparator as ComputeSkillFolderHash and
+		// hash, so ordering and expected digests are covered on every OS.
+		t.Run(tt.name+"/in-memory", func(t *testing.T) {
+			paths := make([]string, 0, len(tt.files))
+			for rel := range tt.files {
+				paths = append(paths, rel)
+			}
+			sort.SliceStable(paths, func(i, j int) bool {
+				if c := jsLocaleCompare(paths[i], paths[j]); c != 0 {
+					return c < 0
+				}
+				return paths[i] < paths[j]
+			})
+			if tt.order != nil && !reflect.DeepEqual(paths, tt.order) {
+				t.Errorf("order = %q, want %q", paths, tt.order)
+			}
+			h := sha256.New()
+			for _, rel := range paths {
+				h.Write([]byte(rel))
+				h.Write([]byte(tt.files[rel]))
+			}
+			if got := hex.EncodeToString(h.Sum(nil)); got != tt.want {
+				t.Errorf("in-memory hash = %s, want %s", got, tt.want)
+			}
+		})
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.caseOnly && caseInsensitive {
+				t.Skip("case-only path differences collide on a case-insensitive filesystem; covered by the in-memory subtest")
+			}
 			dir := t.TempDir()
 			for rel, content := range tt.files {
 				p := filepath.Join(dir, filepath.FromSlash(rel))
@@ -437,6 +476,18 @@ func TestComputeSkillFolderHashUsesLocaleOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+// isCaseInsensitiveFS reports whether the filesystem backing t.TempDir()
+// treats paths that differ only by case as the same file.
+func isCaseInsensitiveFS(t *testing.T) bool {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "case-probe"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := os.Stat(filepath.Join(dir, "CASE-PROBE"))
+	return err == nil
 }
 
 func TestDecodeUTF8WHATWG(t *testing.T) {
