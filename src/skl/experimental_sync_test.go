@@ -389,3 +389,21 @@ func TestGlobMatching(t *testing.T) {
 		}
 	}
 }
+
+// Review #41 audit: pruning a crafted sync lock key stays inside the skills dirs.
+func TestRunSync_PruneCraftedLockKeyStaysConfined(t *testing.T) {
+	lcHermetic(t)
+	cwd := lcSyncProject(t, nil, nil)
+	victim := filepath.Join(cwd, "escape")
+	lcWriteSkill(t, victim, "escape", "must survive")
+	lcWriteLocalLock(t, cwd, map[string]LocalSkillLockEntry{"../escape": {Source: "p", SourceType: "node_modules", ComputedHash: "h"}})
+	if code, _, errOut := lcRunSync(t, cwd, "-y", "--no-frozen-lockfile"); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if !lcExists(filepath.Join(victim, "SKILL.md")) {
+		t.Fatal("sync pruning deleted a directory outside the skills dirs")
+	}
+	if lock, _ := ReadLocalLock(cwd); len(lock.Skills) != 0 {
+		t.Errorf("stale entry should be pruned from the lock: %v", lock.Skills)
+	}
+}

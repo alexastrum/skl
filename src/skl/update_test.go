@@ -502,3 +502,21 @@ func TestRunUpdate_GlobalSkippedAndEmpty(t *testing.T) {
 		t.Errorf("unexpected %s", out)
 	}
 }
+
+// Review #41 item 5: a crafted name must never make UpdateSkill delete outside
+// the canonical skills dir.
+func TestUpdateSkill_RejectsTraversalName(t *testing.T) {
+	lcHermetic(t)
+	cwd := t.TempDir()
+	victim := filepath.Join(cwd, "victim")
+	lcWriteSkill(t, victim, "victim", "must survive")
+	src := lcLocalSource(t, "replacement", "d")
+	for _, name := range []string{"../../victim", "../victim", "..", "."} {
+		if err := UpdateSkill(name, src, UpdateOptions{Cwd: cwd}); err == nil {
+			t.Errorf("UpdateSkill(%q) should fail", name)
+		}
+	}
+	if !lcExists(filepath.Join(victim, "SKILL.md")) {
+		t.Fatal("UpdateSkill deleted a directory outside the canonical skills dir")
+	}
+}

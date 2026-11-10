@@ -232,3 +232,49 @@ func TestValidateSkillMetadataAndParseSkillMd(t *testing.T) {
 		t.Errorf("expected internal skill loaded when INSTALL_INTERNAL_SKILLS=1, got (%+v, %v)", sk3, err)
 	}
 }
+
+// Review #41 item 4: a SKILL.md symlink that resolves outside its skill directory must not be
+// read (its contents would otherwise bypass the #2652 copy confinement via Skill.RawContent).
+func TestParseSkillMdRefusesEscapingSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "secret.md")
+	if err := os.WriteFile(outside, []byte("---\nname: leaked\ndescription: secret\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	skillDir := filepath.Join(root, "skill")
+	if err := os.MkdirAll(filepath.Join(skillDir, "docs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(skillDir, "SKILL.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	skill, err := ParseSkillMd(filepath.Join(skillDir, "SKILL.md"), true)
+	if err == nil || DiagnosticCode(err) != CodeSymlinkOutsideSkill {
+		t.Fatalf("ParseSkillMd(escaping symlink) = (%v, %v), want %s", skill, err, CodeSymlinkOutsideSkill)
+	}
+
+	// A link that stays inside the skill directory is fine.
+	inside := filepath.Join(skillDir, "docs", "skill.md")
+	if err := os.WriteFile(inside, []byte("---\nname: ok\ndescription: fine\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(skillDir, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("docs", "skill.md"), filepath.Join(skillDir, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := ParseSkillMd(filepath.Join(skillDir, "SKILL.md"), true); err != nil || s == nil || s.Name != "ok" {
+		t.Errorf("ParseSkillMd(inside symlink) = (%v, %v)", s, err)
+	}
+
+	// A symlinked skill directory (e.g. an agent dir linking to the canonical copy) is fine.
+	linkedDir := filepath.Join(root, "linked")
+	if err := os.Symlink(skillDir, linkedDir); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := ParseSkillMd(filepath.Join(linkedDir, "SKILL.md"), true); err != nil || s == nil || s.Name != "ok" {
+		t.Errorf("ParseSkillMd(via symlinked dir) = (%v, %v)", s, err)
+	}
+}

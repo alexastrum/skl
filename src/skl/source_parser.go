@@ -362,11 +362,11 @@ func ParseSource(input string, opts ...ParseSourceOptions) (ParsedSource, error)
 
 	if strings.HasPrefix(input, "github:") && len(input) > len("github:") {
 		return ParseSource(appendFragmentRef(input[len("github:"):], fragmentRef, fragmentSkillFilter),
-			ParseSourceOptions{Cwd: o.Cwd})
+			ParseSourceOptions{Cwd: o.Cwd, GitHubHost: o.GitHubHost})
 	}
 	if strings.HasPrefix(input, "gitlab:") && len(input) > len("gitlab:") {
 		return ParseSource(appendFragmentRef("https://gitlab.com/"+input[len("gitlab:"):], fragmentRef, fragmentSkillFilter),
-			ParseSourceOptions{Cwd: o.Cwd})
+			ParseSourceOptions{Cwd: o.Cwd, GitHubHost: o.GitHubHost})
 	}
 	if isSkillsShBare(input) {
 		input = "https://" + input
@@ -752,7 +752,7 @@ func fpCloneAtSha(ctx context.Context, cloneURL, sha, dir string, extraEnv []str
 	if _, err := fpRunGit(ctx, dir, extraEnv, "init", "-q"); err != nil {
 		return err
 	}
-	if _, err := fpRunGit(ctx, dir, extraEnv, "remote", "add", "origin", cloneURL); err != nil {
+	if _, err := fpRunGit(ctx, dir, extraEnv, "remote", "add", "--", "origin", cloneURL); err != nil {
 		return err
 	}
 	if _, err := fpRunGit(ctx, dir, extraEnv, "fetch", "--depth", "1", "origin", sha); err != nil {
@@ -778,12 +778,17 @@ func fpTryGhClone(ctx context.Context, repo *fpGitHubRepoInfo, dir, ref string) 
 	if ghSSHProtocolRe.Match(out) {
 		target = repo.SSHURL
 	}
+	// gh forwards flags after "--" to `git clone`; --config applies the same
+	// LFS/longpaths overrides as GitConfigArgs to the clone and checkout.
 	flags := []string{"--depth=1"}
+	for i := 0; i+1 < len(GitConfigArgs); i += 2 {
+		flags = append(flags, "--config", GitConfigArgs[i+1])
+	}
 	if ref != "" {
 		flags = append(flags, "--branch", ref)
 	}
 	clone := exec.CommandContext(ctx, fpGhBinary, append([]string{"repo", "clone", target, dir, "--"}, flags...)...)
-	clone.Env = fpOverrideEnv(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL="+allowedGitProtocols)
+	clone.Env = GitEnv()
 	clone.Stdout = io.Discard
 	clone.Stderr = io.Discard
 	return clone.Run() == nil
@@ -837,6 +842,13 @@ func fpUpdateSubmodules(ctx context.Context, dir string) {
 func CloneRepo(cloneURL, ref string) (string, error) {
 	if extTransportRe.MatchString(cloneURL) {
 		return "", ErrUnsupportedGitTransport("ext")
+	}
+	// Never let a URL or ref be parsed as a git/gh option.
+	if strings.HasPrefix(cloneURL, "-") {
+		return "", Diagnosticf(CodeGitCloneFailed, "Failed to clone %s: invalid repository URL", cloneURL)
+	}
+	if strings.HasPrefix(ref, "-") {
+		return "", Diagnosticf(CodeGitCloneFailed, "Failed to clone %s: invalid ref %q", cloneURL, ref)
 	}
 	if !IsGitInstalled() {
 		return "", Diagnosticf(CodeGitCloneFailed, "Failed to clone %s: git is not installed or not on PATH", cloneURL)
@@ -946,7 +958,10 @@ func fpGitRevParse(repoDir, rev string) string {
 	return strings.ToLower(h)
 }
 
-// CleanupTempDir removes dir, refusing anything outside os.TempDir().
+// CleanupTempDir removes dir, refusing anything that is not strictly inside
+// os.TempDir() once symlinks in its parent chain are resolved (the temp root
+// itself is never removed). A leaf symlink is removed as a link, never
+// followed. A dir that does not exist is a no-op.
 func CleanupTempDir(dir string) error {
 	if dir == "" {
 		return nil
@@ -956,34 +971,46 @@ func CleanupTempDir(dir string) error {
 		return ErrCleanupOutsideTempDir()
 	}
 	absDir = filepath.Clean(absDir)
-	if !fpIsWithinTempDir(absDir) {
+	realTmp, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
 		return ErrCleanupOutsideTempDir()
 	}
-	return os.RemoveAll(absDir)
+	if abs, err := filepath.Abs(realTmp); err == nil {
+		realTmp = filepath.Clean(abs)
+	}
+	realParent, err := filepath.EvalSymlinks(filepath.Dir(absDir))
+	if err != nil {
+		if _, statErr := os.Lstat(absDir); os.IsNotExist(statErr) && fpIsStrictlyWithin(lexicalTempDir(), absDir) {
+			return nil
+		}
+		return ErrCleanupOutsideTempDir()
+	}
+	resolved := filepath.Join(realParent, filepath.Base(absDir))
+	if !fpIsStrictlyWithin(realTmp, resolved) {
+		return ErrCleanupOutsideTempDir()
+	}
+	return os.RemoveAll(resolved)
 }
 
-func fpIsWithinTempDir(absDir string) bool {
-	tmp, err := filepath.Abs(os.TempDir())
+func lexicalTempDir() string {
+	t, err := filepath.Abs(os.TempDir())
 	if err != nil {
-		return false
+		return os.TempDir()
 	}
-	candidates := []string{filepath.Clean(tmp)}
-	if real, err := filepath.EvalSymlinks(tmp); err == nil {
-		candidates = append(candidates, filepath.Clean(real))
-	}
-	dirs := []string{absDir}
-	if real, err := filepath.EvalSymlinks(absDir); err == nil {
-		dirs = append(dirs, filepath.Clean(real))
-	}
-	for _, d := range dirs {
-		for _, t := range candidates {
-			if d == t || strings.HasPrefix(d, t+string(filepath.Separator)) {
-				return true
-			}
-		}
-	}
-	return false
+	return filepath.Clean(t)
 }
+
+// fpIsStrictlyWithin reports target strictly below base (never equal).
+func fpIsStrictlyWithin(base, target string) bool {
+	base = filepath.Clean(base)
+	target = filepath.Clean(target)
+	if isWindowsPathCaseInsensitive() {
+		base, target = strings.ToLower(base), strings.ToLower(target)
+	}
+	return target != base && strings.HasPrefix(target, strings.TrimSuffix(base, string(filepath.Separator))+string(filepath.Separator))
+}
+
+func isWindowsPathCaseInsensitive() bool { return fpIsWindows() }
 
 // ---------------------------------------------------------------------------
 // Notion helpers (upstream src/notion-test.ts URL handling).

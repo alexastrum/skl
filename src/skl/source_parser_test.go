@@ -518,7 +518,7 @@ exit 0
 			t.Errorf("missing hardened env: %s", l)
 		}
 	}
-	if !strings.Contains(lines[0], "clone --depth 1 --branch "+sha+" -- https://git.example.com/o/r.git") {
+	if !strings.Contains(lines[0], "clone --depth 1 --branch "+sha+" -- https://git.example.com/o/r.git") || !strings.Contains(string(data), "remote add -- origin https://git.example.com/o/r.git") {
 		t.Errorf("clone args: %s", lines[0])
 	}
 	all := string(data)
@@ -738,5 +738,126 @@ func TestCloneRepoDoesNotFetchFileTransportSubmodules(t *testing.T) {
 	// Untrusted .gitmodules must not pull local repositories via file://.
 	if _, err := os.Stat(filepath.Join(dir, "vendor", "sub", "secret.txt")); err == nil {
 		t.Error("file:// submodule was fetched")
+	}
+}
+
+// --- Review #41 regressions -------------------------------------------------
+
+// Review #41 item 2: temp-dir confinement must resolve parent symlinks and
+// never remove the temp root itself.
+func TestCleanupTempDirConfinement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TMPDIR and symlinks behave differently on Windows")
+	}
+	base := t.TempDir()
+	tmpRoot := filepath.Join(base, "tmp")
+	outside := filepath.Join(base, "outside")
+	writeFileT(t, filepath.Join(outside, "victim", "keep.txt"), "keep")
+	if err := os.MkdirAll(tmpRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tmpRoot)
+	if err := os.Symlink(outside, filepath.Join(tmpRoot, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupTempDir(filepath.Join(tmpRoot, "link", "victim")); !IsDiagnostic(err, CodeCleanupOutsideTempDir) {
+		t.Errorf("parent-symlink escape err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "victim", "keep.txt")); err != nil {
+		t.Fatalf("victim deleted through symlink: %v", err)
+	}
+	if err := CleanupTempDir(tmpRoot); !IsDiagnostic(err, CodeCleanupOutsideTempDir) {
+		t.Errorf("temp root err = %v", err)
+	}
+	if err := CleanupTempDir(tmpRoot + "/"); !IsDiagnostic(err, CodeCleanupOutsideTempDir) {
+		t.Errorf("temp root with slash err = %v", err)
+	}
+	// A leaf symlink is removed as a link, never followed.
+	if err := CleanupTempDir(filepath.Join(tmpRoot, "link")); err != nil {
+		t.Errorf("leaf link: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(tmpRoot, "link")); !os.IsNotExist(err) {
+		t.Error("leaf link not removed")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "victim", "keep.txt")); err != nil {
+		t.Fatalf("leaf link target deleted: %v", err)
+	}
+	if err := CleanupTempDir(filepath.Join(tmpRoot, "missing", "x")); err != nil {
+		t.Errorf("missing dir should be a no-op: %v", err)
+	}
+	sib := tmpRoot + "-sibling"
+	writeFileT(t, filepath.Join(sib, "f"), "x")
+	if err := CleanupTempDir(sib); !IsDiagnostic(err, CodeCleanupOutsideTempDir) {
+		t.Errorf("prefix sibling err = %v", err)
+	}
+}
+
+// Review #41 item 8a: URLs and refs must never be parsed as git options.
+func TestCloneRepoRejectsOptionLikeURLAndRef(t *testing.T) {
+	old := fpGitBinary
+	fpGitBinary = filepath.Join(t.TempDir(), "no-such-git")
+	defer func() { fpGitBinary = old }()
+	if _, err := CloneRepo("--upload-pack=touch /tmp/pwned", ""); !IsDiagnostic(err, CodeGitCloneFailed) || !strings.Contains(err.Error(), "invalid repository URL") {
+		t.Errorf("option-like URL err = %v", err)
+	}
+	if _, err := CloneRepo("https://git.example.com/o/r.git", "--upload-pack=x"); !IsDiagnostic(err, CodeGitCloneFailed) || !strings.Contains(err.Error(), "invalid ref") {
+		t.Errorf("option-like ref err = %v", err)
+	}
+}
+
+// Review #41 item 8b: the gh fallback gets the hardened env and the same
+// LFS/longpaths config as direct git clones.
+func TestCloneRepoGhFallbackIsHardened(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fakes")
+	}
+	tmp := t.TempDir()
+	logFile := filepath.Join(tmp, "log")
+	fakeGit := filepath.Join(tmp, "git")
+	writeFileT(t, fakeGit, "#!/bin/sh\necho \"git $*\" >> \""+logFile+"\"\necho 'remote: Repository not found.' >&2\nexit 128\n")
+	fakeGh := filepath.Join(tmp, "gh")
+	writeFileT(t, fakeGh, `#!/bin/sh
+if [ "$1" = "auth" ]; then echo "Git operations protocol: https"; exit 0; fi
+echo "gh $* LC_ALL=$LC_ALL PROTO=$GIT_ALLOW_PROTOCOL PROMPT=$GIT_TERMINAL_PROMPT SMUDGE=$GIT_LFS_SKIP_SMUDGE" >> "`+logFile+`"
+exit 1
+`)
+	for _, f := range []string{fakeGit, fakeGh} {
+		if err := os.Chmod(f, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldGit, oldGh := fpGitBinary, fpGhBinary
+	fpGitBinary, fpGhBinary = fakeGit, fakeGh
+	defer func() { fpGitBinary, fpGhBinary = oldGit, oldGh }()
+	t.Setenv("GH_HOST", "")
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	_, err := CloneRepo("https://github.com/acme/private.git", "main")
+	if !IsDiagnostic(err, CodeGitAuthFailed) || !strings.Contains(err.Error(), "git@github.com:acme/private.git") {
+		t.Errorf("err = %v", err)
+	}
+	data, _ := os.ReadFile(logFile)
+	var ghLine string
+	for _, l := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(l, "gh ") {
+			ghLine = l
+		}
+	}
+	for _, want := range []string{"repo clone acme/private", "--depth=1", "--config core.longpaths=true", "--config filter.lfs.smudge=", "--branch main",
+		"LC_ALL=C ", "PROTO=https:http:ssh:git:file", "PROMPT=0", "SMUDGE=1"} {
+		if !strings.Contains(ghLine, want) {
+			t.Errorf("gh call missing %q: %s", want, ghLine)
+		}
+	}
+	if !strings.Contains(string(data), "git@github.com:acme/private.git") {
+		t.Errorf("SSH retry not attempted:\n%s", data)
+	}
+}
+
+// Review #41 item 8d: github:/gitlab: prefixes keep a pinned GitHubHost.
+func TestParseSourcePrefixKeepsPinnedHost(t *testing.T) {
+	t.Setenv("GH_HOST", "github.example.com")
+	got, err := ParseSource("github:acme/skills@review", ParseSourceOptions{GitHubHost: "github.com"})
+	if err != nil || got.Type != SourceTypeGitHub || got.URL != "https://github.com/acme/skills.git" || got.SkillFilter != "review" {
+		t.Errorf("pinned github: prefix = %+v, %v", got, err)
 	}
 }

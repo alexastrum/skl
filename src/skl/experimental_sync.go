@@ -633,13 +633,21 @@ func PruneStaleSkills(cwd string, keep map[string]bool, keepRemote func(LocalSki
 			e := lock.Skills[key]
 			entry = &e
 		}
-		dests := map[string]bool{canonicalDir: true}
+		// Destinations as (dir, element) pairs so removal stays confined to each dir.
+		type dest struct{ dir, elem string }
+		seenDest := map[string]bool{}
+		dests := []dest{{canonicalBase, name}}
 		for _, a := range sortedAgentKeys() {
-			dests[GetInstallPath(name, AgentType(a), false, cwd)] = true
+			dests = append(dests, dest{GetAgentBaseDir(AgentType(a), false, cwd, ""), SanitizeName(name)})
 		}
-		for _, d := range keysOf(dests) {
-			if foreignDestination(d, canonicalDir, entry, cwd) == "" {
-				_ = os.RemoveAll(d)
+		for _, d := range dests {
+			p := filepath.Join(d.dir, d.elem)
+			if seenDest[p] {
+				continue
+			}
+			seenDest[p] = true
+			if foreignDestination(p, canonicalDir, entry, cwd) == "" {
+				_ = lcRemoveSkillDir(d.dir, d.elem)
 			}
 		}
 		if hasKey {

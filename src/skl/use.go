@@ -183,15 +183,17 @@ func MaterializeUseSkill(skill Skill, dirName string) (*MaterializedUseSkill, er
 		_ = os.RemoveAll(tempRoot)
 		return nil, err
 	}
-	skillMd := skill.RawContent
-	if skillMd == "" {
-		raw, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
-		if err != nil {
-			_ = os.RemoveAll(tempRoot)
-			return nil, err
+	// Always read SKILL.md from the confined copy: a SKILL.md symlink that escapes the
+	// skill root was skipped by CopySkillDirectory and must not leak through RawContent.
+	raw, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
+	if err != nil {
+		_ = os.RemoveAll(tempRoot)
+		if os.IsNotExist(err) {
+			return nil, ErrNoValidSkills()
 		}
-		skillMd = string(raw)
+		return nil, err
 	}
+	skillMd := string(raw)
 	has, err := containsSupportingFiles(skillDir, skillDir)
 	if err != nil {
 		_ = os.RemoveAll(tempRoot)

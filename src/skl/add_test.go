@@ -1040,3 +1040,45 @@ func TestRunAdd_NotionPackLocksPerSkillURL(t *testing.T) {
 		t.Errorf("lock entry = %+v", e)
 	}
 }
+
+// Review #41 item 9: a single unknown -a value stays an agent (so `install -a bogus`
+// reports an invalid agent instead of being treated as a source).
+func TestParseAddCLIOptions_SingleUnknownAgentNotReclaimed(t *testing.T) {
+	instTestEnv(t)
+	p := ParseAddCLIOptions([]string{"-a", "bogus"})
+	if len(p.Sources) != 0 || len(p.Options.Agent) != 1 || p.Options.Agent[0] != "bogus" {
+		t.Errorf("parsed = %+v", p)
+	}
+	p = ParseAddCLIOptions([]string{"-s", "./skills"})
+	if len(p.Sources) != 0 || len(p.Options.Skill) != 1 {
+		t.Errorf("parsed = %+v", p)
+	}
+}
+
+// Review #41 item 10: --frozen-lockfile refuses well-known drift before touching disk.
+func TestInstallFromSource_FrozenWellKnownRefusedBeforeDisk(t *testing.T) {
+	_, cwd := instTestEnv(t)
+	root := filepath.Join(t.TempDir(), "wk")
+	instWriteSkill(t, filepath.Join(root, "wk-skill"), "wk-skill")
+	f := &FetchedSource{SourceType: SourceTypeWellKnown, Source: "example.com", SourceURL: "https://example.com", RootDir: root, Via: "well-known",
+		Skills: []FetchedSkill{{Skill: Skill{Name: "wk-skill", Description: "d", Path: filepath.Join(root, "wk-skill")}, WellKnownDigest: "sha256:aa"}}}
+	frozen := LocalSkillLockFile{Version: 1, Skills: map[string]LocalSkillLockEntry{
+		"wk-skill": {Source: "example.com", SourceType: SourceTypeWellKnown, ComputedHash: "0000"},
+	}}
+	res := InstallFromSource(f, InstallFromSourceOptions{Agents: []AgentType{"codex"}, FrozenLock: &frozen, Cwd: cwd})
+	if res.Error == "" || len(res.Installed) != 0 {
+		t.Fatalf("expected refusal: %+v", res)
+	}
+	if instExists(filepath.Join(cwd, ".agents", "skills", "wk-skill")) {
+		t.Error("drifted well-known skill was written to disk")
+	}
+	// Matching hash installs.
+	h, err := addStagedCopyHash(filepath.Join(root, "wk-skill"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen.Skills["wk-skill"] = LocalSkillLockEntry{Source: "example.com", SourceType: SourceTypeWellKnown, ComputedHash: h}
+	if res := InstallFromSource(f, InstallFromSourceOptions{Agents: []AgentType{"codex"}, FrozenLock: &frozen, Cwd: cwd}); res.Error != "" || len(res.Installed) != 1 {
+		t.Errorf("matching frozen well-known: %+v", res)
+	}
+}

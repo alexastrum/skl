@@ -431,3 +431,25 @@ func TestLinkSkillToAgents(t *testing.T) {
 		t.Errorf("expected aggregated error, got %v", err)
 	}
 }
+
+// Review #41 item 3b: when the canonical dir is itself a link (link mode), the agent link
+// must point at the canonical dir, not at the source it resolves to.
+func TestInstallSkillForAgent_LinkModeAgentLinkTargetsCanonical(t *testing.T) {
+	instSkipNoSymlinks(t)
+	_, cwd := instTestEnv(t)
+	src := instWriteSkill(t, filepath.Join(t.TempDir(), "node_modules", "pkg"), "linked-src")
+	res := InstallSkillForAgent(Skill{Name: "linked-src", Path: src}, "claude-code", InstallOptions{Cwd: cwd, Mode: InstallModeLink})
+	if !res.Success {
+		t.Fatalf("result: %+v", res)
+	}
+	target, err := os.Readlink(filepath.Join(cwd, ".claude", "skills", "linked-src"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join("..", "..", ".agents", "skills", "linked-src"); target != want {
+		t.Errorf("agent link target = %s, want %s", target, want)
+	}
+	if !instExists(filepath.Join(cwd, ".claude", "skills", "linked-src", "SKILL.md")) {
+		t.Error("agent link must resolve to the skill")
+	}
+}

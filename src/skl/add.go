@@ -129,15 +129,18 @@ func ParseAddCLIOptions(args []string) ParsedAddCLI {
 	type lastToken struct {
 		flag  string
 		value string
+		count int // values consumed by this flag occurrence
 	}
 	var last *lastToken
 
 	consume := func(i int, flag string, add func(string)) int {
 		j := i + 1
+		n := 0
 		for j < len(args) && args[j] != "" && !strings.HasPrefix(args[j], "-") {
 			for _, v := range addSplitCommas(args[j]) {
 				add(v)
-				last = &lastToken{flag: flag, value: v}
+				n++
+				last = &lastToken{flag: flag, value: v, count: n}
 			}
 			j++
 		}
@@ -192,7 +195,9 @@ func ParseAddCLIOptions(args []string) ParsedAddCLI {
 		}
 	}
 
-	if len(res.Sources) == 0 && last != nil {
+	// Only reclaim when the flag took more than one value, so `install -a bogus` still
+	// reports an invalid agent instead of treating "bogus" as a source.
+	if len(res.Sources) == 0 && last != nil && last.count >= 2 {
 		reclaim := false
 		switch last.flag {
 		case "agent":
@@ -797,6 +802,20 @@ func addResolvePackPointers(units []addUnit, cwd string, out io.Writer, extra *[
 	return result
 }
 
+// addStagedCopyHash hashes the copy CopySkillDirectory would install from dir.
+func addStagedCopyHash(dir string) (string, error) {
+	tmp, err := os.MkdirTemp("", "skills-hash-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmp)
+	staged := filepath.Join(tmp, "skill")
+	if err := CopySkillDirectory(dir, staged, "", false); err != nil {
+		return "", err
+	}
+	return ComputeSkillFolderHash(staged)
+}
+
 // InstallFromSourceOptions configures InstallFromSource (restore from lock and sync).
 type InstallFromSourceOptions struct {
 	// Skills selects skills by name (FilterSkills rules); all when empty.
@@ -856,10 +875,12 @@ func InstallFromSource(f *FetchedSource, o InstallFromSourceOptions) SourceInsta
 		return changes
 	}
 	if o.FrozenLock != nil {
-		// Well-known skills can only be hashed once installed.
+		// Refuse drift before anything touches disk. Well-known skills are hashed as
+		// installed, so hash a staged copy of them.
 		changes := frozenChanges(func(u addUnit) (string, bool) {
 			if u.src.SourceType == SourceTypeWellKnown {
-				return "", false
+				h, err := addStagedCopyHash(u.skill.Path)
+				return h, err == nil
 			}
 			h, err := addUnitHash(u, nil)
 			return h, err == nil

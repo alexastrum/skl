@@ -201,3 +201,23 @@ func TestLaunchAgentInteractively(t *testing.T) {
 		t.Errorf("unsupported agent: %v", err)
 	}
 }
+
+// Review #41 item 4: a SKILL.md symlink escaping the skill root must not leak into the prompt.
+func TestMaterializeUseSkill_EscapingSkillMdSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "outside.md"), []byte("---\nname: x\ndescription: TOPSECRET\n---\n"), 0o600)
+	dir := filepath.Join(root, "skill")
+	_ = os.MkdirAll(dir, 0o755)
+	instSymlink(t, filepath.Join(root, "outside.md"), filepath.Join(dir, "SKILL.md"))
+	m, err := MaterializeUseSkill(Skill{Name: "x", Path: dir, RawContent: "---\nname: x\ndescription: TOPSECRET\n---\n"}, "")
+	if err == nil {
+		defer os.RemoveAll(m.TempRoot)
+		t.Fatalf("expected an error, got %+v", m)
+	}
+	if strings.Contains(err.Error(), "TOPSECRET") {
+		t.Error("error leaked outside content")
+	}
+}

@@ -359,3 +359,42 @@ func TestScanInstalledSkillNames_Guards(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
+
+func TestLcRemoveSkillDir_RejectsUnsafeNames(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(filepath.Dir(dir), filepath.Base(dir)+"-sibling")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(outside) })
+	for _, name := range []string{"", ".", "..", "../" + filepath.Base(outside), "a/b", `a\b`} {
+		if err := lcRemoveSkillDir(dir, name); err == nil {
+			t.Errorf("lcRemoveSkillDir(%q) should be refused", name)
+		}
+	}
+	if !lcExists(outside) || !lcExists(dir) {
+		t.Fatal("unsafe removal touched the filesystem")
+	}
+	lcWriteSkill(t, filepath.Join(dir, "ok"), "ok", "d")
+	if err := lcRemoveSkillDir(dir, "ok"); err != nil || lcExists(filepath.Join(dir, "ok")) {
+		t.Errorf("safe removal failed: %v", err)
+	}
+}
+
+// Review #41 audit: crafted lock keys cannot steer removal outside the skills dirs.
+func TestRemoveSkills_CraftedLockKeyStaysConfined(t *testing.T) {
+	lcHermetic(t)
+	cwd := t.TempDir()
+	victim := filepath.Join(cwd, "victim")
+	lcWriteSkill(t, victim, "victim", "must survive")
+	lcWriteLocalLock(t, cwd, map[string]LocalSkillLockEntry{"../victim": {Source: "o/r", SourceType: "github", ComputedHash: "h"}})
+	if err := RemoveSkills([]string{"../victim"}, RemoveOptions{Yes: true}, cwd); err != nil {
+		t.Fatal(err)
+	}
+	if !lcExists(filepath.Join(victim, "SKILL.md")) {
+		t.Fatal("remove deleted a directory outside the skills dirs")
+	}
+	if lock, _ := ReadLocalLock(cwd); len(lock.Skills) != 0 {
+		t.Errorf("stale lock entry should still be removed: %v", lock.Skills)
+	}
+}

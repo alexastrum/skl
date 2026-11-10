@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -1862,4 +1863,186 @@ func TestFetchSourcesKeepsOrder(t *testing.T) {
 		t.Fatalf("out=%v errs=%v", out, errs)
 	}
 	provWantCode(t, errs[1], CodeLocalPathNotFound)
+}
+
+// ===========================================================================
+// Review #41 regressions
+
+// rawTarHeader builds a 512-byte ustar header block with a valid checksum.
+func rawTarHeader(name string, typeflag byte, size int64) []byte {
+	h := make([]byte, 512)
+	copy(h[0:100], name)
+	copy(h[100:108], "0000644\x00")
+	copy(h[108:116], "0000000\x00")
+	copy(h[116:124], "0000000\x00")
+	copy(h[124:136], []byte(strings.Repeat("0", 11-len(strconvOctal(size)))+strconvOctal(size)+"\x00"))
+	copy(h[136:148], "00000000000\x00")
+	h[156] = typeflag
+	copy(h[257:263], "ustar\x00")
+	copy(h[263:265], "00")
+	for i := 148; i < 156; i++ {
+		h[i] = ' '
+	}
+	var sum int64
+	for _, b := range h {
+		sum += int64(b)
+	}
+	cs := strconvOctal(sum)
+	copy(h[148:156], strings.Repeat("0", 6-len(cs))+cs+"\x00 ")
+	return h
+}
+
+func strconvOctal(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	var out []byte
+	for n > 0 {
+		out = append([]byte{byte('0' + n%8)}, out...)
+		n /= 8
+	}
+	return string(out)
+}
+
+func padTar(b []byte) []byte {
+	if r := len(b) % 512; r != 0 {
+		b = append(b, make([]byte, 512-r)...)
+	}
+	return b
+}
+
+// Review #41 item 1: GNU long-name records are read by archive/tar before
+// Next returns; a flood of them must hit the decompressed-stream cap.
+func TestExtractTarArchiveCapsDecompressedStream(t *testing.T) {
+	var raw []byte
+	record := bytes.Repeat([]byte("a"), 600*1024)
+	for i := 0; i < 4; i++ {
+		raw = append(raw, rawTarHeader("././@LongLink", 'L', int64(len(record)))...)
+		raw = append(raw, padTar(append([]byte{}, record...))...)
+	}
+	raw = append(raw, rawTarHeader("f.txt", '0', 1)...)
+	raw = append(raw, padTar([]byte("x"))...)
+	raw = append(raw, make([]byte, 1024)...)
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	_, _ = zw.Write(raw)
+	_ = zw.Close()
+	err := ExtractTarArchive(bytes.NewReader(gz.Bytes()), t.TempDir(), true, 1024, 1)
+	if !IsDiagnostic(err, CodeArchiveTooLarge) {
+		t.Fatalf("long-name flood err = %v; want SKILLS_ARCHIVE_TOO_LARGE", err)
+	}
+}
+
+func tarBytes(t *testing.T, entries []tar.Header, data map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, h := range entries {
+		h := h
+		content := data[h.Name]
+		if h.Typeflag == tar.TypeReg {
+			h.Size = int64(len(content))
+		}
+		if h.Mode == 0 {
+			h.Mode = 0o644
+		}
+		if err := tw.WriteHeader(&h); err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag == tar.TypeReg {
+			_, _ = tw.Write([]byte(content))
+		}
+	}
+	_ = tw.Close()
+	return buf.Bytes()
+}
+
+// Review #41 item 7: drive-letter directory/file names and dot segments.
+func TestExtractTarArchiveRejectsDriveAndDotPaths(t *testing.T) {
+	for _, h := range []tar.Header{
+		{Name: "C:/dir/", Typeflag: tar.TypeDir},
+		{Name: "C:file", Typeflag: tar.TypeReg},
+		{Name: ".", Typeflag: tar.TypeReg},
+		{Name: "sub/.", Typeflag: tar.TypeReg},
+	} {
+		data := tarBytes(t, []tar.Header{h}, map[string]string{h.Name: "x"})
+		err := ExtractTarArchive(bytes.NewReader(data), t.TempDir(), false, 1<<20, 10)
+		if !IsDiagnostic(err, CodeArchiveUnsafePath) {
+			t.Errorf("%q: err = %v; want SKILLS_ARCHIVE_UNSAFE_PATH", h.Name, err)
+		}
+	}
+	ok := tarBytes(t, []tar.Header{{Name: "./", Typeflag: tar.TypeDir}, {Name: "./pkg/SKILL.md", Typeflag: tar.TypeReg}}, map[string]string{"./pkg/SKILL.md": "hi"})
+	dest := t.TempDir()
+	if err := ExtractTarArchive(bytes.NewReader(ok), dest, false, 1<<20, 10); err != nil {
+		t.Fatalf("./ prefixed archive: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "pkg", "SKILL.md")); err != nil {
+		t.Error(err)
+	}
+}
+
+func gzipBytes(b []byte) []byte {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write(b)
+	_ = zw.Close()
+	return buf.Bytes()
+}
+
+// Review #41 item 6: well-known tar.gz entry counting, duplicates and truncation.
+func TestExtractWellKnownTarGzHardening(t *testing.T) {
+	var many []tar.Header
+	data := map[string]string{"SKILL.md": "---\nname: a\ndescription: b\n---\n"}
+	for i := 0; i < wellKnownMaxArchiveFiles+1; i++ {
+		many = append(many, tar.Header{Name: "SKILL.md", Typeflag: tar.TypeReg})
+	}
+	if _, err := extractWellKnownTarGz(gzipBytes(tarBytes(t, many, data))); !IsDiagnostic(err, CodeWellknownArchiveTooManyFiles) {
+		t.Errorf("duplicate names err = %v", err)
+	}
+	var dirs []tar.Header
+	for i := 0; i < wellKnownMaxArchiveFiles+1; i++ {
+		dirs = append(dirs, tar.Header{Name: "d" + strconvOctal(int64(i)) + "/", Typeflag: tar.TypeDir, Mode: 0o755})
+	}
+	if _, err := extractWellKnownTarGz(gzipBytes(tarBytes(t, dirs, nil))); !IsDiagnostic(err, CodeWellknownArchiveTooManyFiles) {
+		t.Errorf("directory entries must count, err = %v", err)
+	}
+	full := tarBytes(t, []tar.Header{{Name: "SKILL.md", Typeflag: tar.TypeReg}}, map[string]string{"SKILL.md": strings.Repeat("z", 2000)})
+	truncated := full[:512+700]
+	if _, err := extractWellKnownTarGz(gzipBytes(truncated)); !IsDiagnostic(err, CodeArchiveInvalid) {
+		t.Errorf("truncated entry err = %v", err)
+	}
+	if files, err := extractWellKnownTarGz(gzipBytes(full)); err != nil || len(files["SKILL.md"]) != 2000 {
+		t.Errorf("valid archive: %v", err)
+	}
+}
+
+// Review #41 item 4: discovery must not follow a SKILL.md symlink that
+// escapes its skill directory.
+func TestDiscoverSkillsIgnoresEscapingSkillMdSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	outside := t.TempDir()
+	writeFileT(t, filepath.Join(outside, "SKILL.md"), "---\nname: stolen\ndescription: host file\n---\n")
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "skills", "evil"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "SKILL.md"), filepath.Join(root, "skills", "evil", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	writeFileT(t, filepath.Join(root, "skills", "good", "real.md"), "---\nname: good\ndescription: ok\n---\n")
+	if err := os.Symlink("real.md", filepath.Join(root, "skills", "good", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	old := skillWarningWriter
+	skillWarningWriter = io.Discard
+	defer func() { skillWarningWriter = old }()
+	skills, err := DiscoverSkills(root, "", DiscoverSkillsOptions{FullDepth: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skills) != 1 || skills[0].Name != "good" {
+		t.Fatalf("skills = %+v; want only the confined symlink skill", skills)
+	}
 }

@@ -148,6 +148,26 @@ func isSameDir(a, b string) bool {
 	return filepath.Clean(ra) == filepath.Clean(rb)
 }
 
+// lcIsStrictlyWithin reports whether target is inside base (and not base itself).
+func lcIsStrictlyWithin(base, target string) bool {
+	b, t := filepath.Clean(base), filepath.Clean(target)
+	return b != t && lcIsPathSafe(b, t)
+}
+
+// lcRemoveSkillDir deletes dir/name, where name must be a single path element.
+// Every lifecycle deletion goes through it, so a crafted lock key, skill name
+// or directory entry can never make RemoveAll touch anything outside dir.
+func lcRemoveSkillDir(dir, name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) || filepath.Base(name) != name || filepath.VolumeName(name) != "" {
+		return fmt.Errorf("refusing to remove unsafe skill path %q in %s", name, dir)
+	}
+	target := filepath.Join(dir, name)
+	if !lcIsStrictlyWithin(dir, target) {
+		return fmt.Errorf("refusing to remove %s: outside %s", target, dir)
+	}
+	return os.RemoveAll(target)
+}
+
 // FindGloballyTrackedSkills returns the selected skills a project-scoped remove must
 // refuse: when cwd's skills dir is the global one (cwd is $HOME), removing would
 // delete a globally tracked skill and orphan its global lock entry (#2592, #2469).
@@ -216,23 +236,24 @@ func RemoveInstalledSkills(skills []string, opts RemoveInstalledOptions) []Remov
 			if !ok {
 				continue
 			}
-			paths := []string{GetInstallPath(skillName, a, isGlobal, cwd)}
+			dirs := []string{GetAgentBaseDir(a, isGlobal, cwd, "")}
 			if isGlobal && cfg.GlobalSkillsDir != "" {
-				paths = append(paths, filepath.Join(ResolvePath(cfg.GlobalSkillsDir, cwd), sanitized))
+				dirs = append(dirs, ResolvePath(cfg.GlobalSkillsDir, cwd))
 			} else if !isGlobal {
-				paths = append(paths, filepath.Join(cwd, cfg.SkillsDir, sanitized))
+				dirs = append(dirs, filepath.Join(cwd, cfg.SkillsDir))
 				if a == "eve" {
 					for _, sub := range GetEveSubagents(cwd) {
-						paths = append(paths, filepath.Join(GetEveSubagentSkillsDir(sub, cwd), sanitized))
+						dirs = append(dirs, GetEveSubagentSkillsDir(sub, cwd))
 					}
 				}
 			}
-			for _, p := range paths {
+			for _, d := range dirs {
+				p := filepath.Join(d, sanitized)
 				if p == canonicalPath {
 					continue
 				}
 				if _, err := os.Lstat(p); err == nil {
-					if err := os.RemoveAll(p); err != nil && opts.OnWarn != nil {
+					if err := lcRemoveSkillDir(d, sanitized); err != nil && opts.OnWarn != nil {
 						opts.OnWarn(fmt.Sprintf("Could not remove skill from %s: %v", cfg.DisplayName, err))
 					}
 				}
@@ -252,7 +273,7 @@ func RemoveInstalledSkills(skills []string, opts RemoveInstalledOptions) []Remov
 
 		res := RemoveSkillResult{Skill: skillName, Success: true, Source: "local", SourceType: "local"}
 		if !stillUsed {
-			if err := os.RemoveAll(canonicalPath); err != nil {
+			if err := lcRemoveSkillDir(GetCanonicalSkillsDir(isGlobal, cwd), sanitized); err != nil {
 				res.Success = false
 				res.Error = err.Error()
 				results = append(results, res)

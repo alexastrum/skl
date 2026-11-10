@@ -11,10 +11,8 @@ import (
 	"io"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -969,33 +967,11 @@ func ComputeGitTreeHash(dir string) (string, error) {
 	return hex.EncodeToString(sha[:]), nil
 }
 
-var gitSHA1HexRegex = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
-
 // GetGitRepoTreeHash resolves HEAD:<folderPath> via git rev-parse in a cloned repository,
-// matching getGitTreeHash(repoDir, skillPath) in upstream src/git.ts.
+// matching getGitTreeHash(repoDir, skillPath) in upstream src/git.ts. It delegates to
+// GetGitTreeHash (source_parser.go), which applies the clone timeout and hardened git env.
 func GetGitRepoTreeHash(repoDir, skillPath string) string {
-	normalized := strings.ReplaceAll(skillPath, "\\", "/")
-	segments := strings.Split(normalized, "/")
-	if len(segments) > 0 {
-		segments = segments[:len(segments)-1]
-	}
-	folderPath := strings.Join(segments, "/")
-	rev := "HEAD^{tree}"
-	if folderPath != "" {
-		rev = "HEAD:" + folderPath
-	}
-
-	cmd := exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--end-of-options", rev)
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	hash := strings.TrimSpace(string(out))
-	if !gitSHA1HexRegex.MatchString(hash) {
-		return ""
-	}
-	return strings.ToLower(hash)
+	return GetGitTreeHash(repoDir, skillPath)
 }
 
 // --- JavaScript-compatible collation (String.prototype.localeCompare) ---

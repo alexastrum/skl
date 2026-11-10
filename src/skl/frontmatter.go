@@ -120,7 +120,13 @@ func ShouldInstallInternalSkills() bool {
 // ParseSkillMd reads and validates a SKILL.md file from disk, matching parseSkillMd in src/skills.ts.
 // Returns (nil, nil) if the skill is marked `metadata.internal: true` and includeInternal is false
 // (unless INSTALL_INTERNAL_SKILLS=1/true is set).
+// A SKILL.md that is a symlink resolving outside its skill directory is refused with
+// SKILLS_SYMLINK_OUTSIDE_SKILL instead of being read (skl hardening, matching the #2652 copy
+// confinement; upstream reads through the link).
 func ParseSkillMd(skillMdPath string, includeInternal bool) (*Skill, error) {
+	if err := checkSkillMdConfined(skillMdPath); err != nil {
+		return nil, err
+	}
 	rawBytes, err := os.ReadFile(skillMdPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
@@ -157,4 +163,28 @@ func ParseSkillMd(skillMdPath string, includeInternal bool) (*Skill, error) {
 		RawContent:  raw,
 		Metadata:    metadata,
 	}, nil
+}
+
+// checkSkillMdConfined returns SKILLS_SYMLINK_OUTSIDE_SKILL when skillMdPath is a symlink whose
+// real path is outside the real path of its directory. Regular files, and links that stay inside
+// the skill directory (including when the skill directory itself is a symlink), pass.
+func checkSkillMdConfined(skillMdPath string) error {
+	info, err := os.Lstat(skillMdPath)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return nil // missing files are reported by the read; regular files cannot escape
+	}
+	realDir, err := filepath.EvalSymlinks(filepath.Dir(skillMdPath))
+	if err != nil {
+		return nil
+	}
+	realFile, err := filepath.EvalSymlinks(skillMdPath)
+	if err != nil {
+		return nil // broken link: the read reports it
+	}
+	rel, err := filepath.Rel(realDir, realFile)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return NewDiagnostic(CodeSymlinkOutsideSkill,
+			fmt.Sprintf("Skipping symlink that points outside the skill directory: %s", skillMdPath), "")
+	}
+	return nil
 }

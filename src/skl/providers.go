@@ -554,19 +554,21 @@ func validateTarPath(p string) (string, bool) {
 	if strings.ContainsRune(n, 0) {
 		return "", false
 	}
-	if n == "" || strings.HasSuffix(n, "/") {
-		if strings.HasPrefix(n, "/") || fpHasDotDot(n) {
-			return "", false
-		}
-		return n, true
-	}
-	if strings.HasPrefix(n, "/") || (len(n) >= 3 && fpIsASCIILetter(n[0]) && n[1] == ':' && n[2] == '/') {
-		return "", false
-	}
-	if fpHasDotDot(n) {
+	// Absolute, drive-letter ("C:/x", drive-relative "C:x") and traversal
+	// paths are unsafe for directories and files alike.
+	if strings.HasPrefix(n, "/") || (len(n) >= 2 && fpIsASCIILetter(n[0]) && n[1] == ':') || fpHasDotDot(n) {
 		return "", false
 	}
 	return n, true
+}
+
+func fpHasDotSegment(p string) bool {
+	for _, s := range strings.Split(strings.TrimSuffix(p, "/"), "/") {
+		if s == "." {
+			return true
+		}
+	}
+	return false
 }
 
 func fpHasDotDot(p string) bool {
@@ -592,7 +594,13 @@ func ExtractTarArchive(r io.Reader, destDir string, isGzip bool, maxExtractedByt
 		defer gz.Close()
 		r = gz
 	}
-	tr := tar.NewReader(r)
+	// Bound the raw (decompressed) tar stream: file data plus generous room
+	// for headers, PAX/GNU long-name records and padding, so gzip bombs and
+	// header floods cannot exhaust memory or disk before the per-entry
+	// accounting below runs.
+	tooLarge := Diagnosticf(CodeArchiveTooLarge, "Archive extracts to more than %d bytes. Set SKILLS_EXTRACT_MAX_BYTES to override.", maxExtractedBytes)
+	cr := &fpCappedReader{r: r, remaining: maxExtractedBytes + int64(maxEntries+2)*(3*512) + 1<<20, err: tooLarge}
+	tr := tar.NewReader(cr)
 	var entries int
 	var total int64
 	for {
@@ -604,6 +612,9 @@ func ExtractTarArchive(r io.Reader, destDir string, isGzip bool, maxExtractedByt
 			return nil
 		}
 		if err != nil {
+			if cr.exceeded {
+				return tooLarge
+			}
 			return fpArchiveInvalid("Invalid tar archive: " + err.Error())
 		}
 		safe, ok := validateTarPath(hdr.Name)
@@ -636,6 +647,9 @@ func ExtractTarArchive(r io.Reader, destDir string, isGzip bool, maxExtractedByt
 			if safe == "" || strings.HasSuffix(safe, "/") {
 				continue
 			}
+			if fpHasDotSegment(safe) || filepath.Clean(target) == filepath.Clean(destDir) {
+				return Diagnosticf(CodeArchiveUnsafePath, "Archive contains unsafe path: %s", hdr.Name)
+			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
@@ -650,6 +664,9 @@ func ExtractTarArchive(r io.Reader, destDir string, isGzip bool, maxExtractedByt
 			n, err := io.Copy(f, io.LimitReader(tr, hdr.Size))
 			cerr := f.Close()
 			if err != nil {
+				if cr.exceeded {
+					return tooLarge
+				}
 				return fpArchiveInvalid("Invalid tar archive: " + err.Error())
 			}
 			if cerr != nil {
@@ -662,6 +679,33 @@ func ExtractTarArchive(r io.Reader, destDir string, isGzip bool, maxExtractedByt
 			// Devices, FIFOs and metadata entries are skipped.
 		}
 	}
+}
+
+// fpCappedReader returns err once more than remaining bytes are read.
+type fpCappedReader struct {
+	r         io.Reader
+	remaining int64
+	err       error
+	exceeded  bool
+}
+
+func (c *fpCappedReader) Read(p []byte) (int, error) {
+	if c.remaining <= 0 {
+		// Allow a clean EOF exactly at the limit; anything more is too large.
+		var one [1]byte
+		n, err := c.r.Read(one[:])
+		if n > 0 {
+			c.exceeded = true
+			return 0, c.err
+		}
+		return 0, err
+	}
+	if int64(len(p)) > c.remaining {
+		p = p[:c.remaining]
+	}
+	n, err := c.r.Read(p)
+	c.remaining -= int64(n)
+	return n, err
 }
 
 // fpIsRejectedArchive reports a readable archive whose contents are refused
@@ -1051,8 +1095,27 @@ func parseSkillMdWithWarning(skillMdPath string, includeInternal bool) *Skill {
 	return s
 }
 
+// fpHasSkillMd reports a regular SKILL.md in dir. A SKILL.md symlink counts
+// only when its real path stays inside the (real) skill directory, so a
+// crafted repo cannot make discovery read host files (#2652 confinement).
 func fpHasSkillMd(dir string) bool {
-	st, err := os.Stat(filepath.Join(dir, "SKILL.md"))
+	p := filepath.Join(dir, "SKILL.md")
+	lst, err := os.Lstat(p)
+	if err != nil {
+		return false
+	}
+	if lst.Mode()&os.ModeSymlink != 0 {
+		realFile, err1 := filepath.EvalSymlinks(p)
+		realDir, err2 := filepath.EvalSymlinks(dir)
+		if err1 != nil || err2 != nil {
+			return false
+		}
+		realFile, realDir = filepath.Clean(realFile), filepath.Clean(realDir)
+		if !strings.HasPrefix(realFile, realDir+string(filepath.Separator)) {
+			return false
+		}
+	}
+	st, err := os.Stat(p)
 	return err == nil && st.Mode().IsRegular()
 }
 
@@ -2314,16 +2377,29 @@ func extractWellKnownTarGz(data []byte) (map[string][]byte, error) {
 		return nil, fpArchiveInvalid("Invalid gzip archive")
 	}
 	defer gz.Close()
-	tr := tar.NewReader(io.LimitReader(gz, wellKnownMaxArchiveBytes*2))
+	tooLarge := NewDiagnostic(CodeWellknownArchiveTooLarge, "Archive exceeds maximum unpacked size", "")
+	cr := &fpCappedReader{r: gz, remaining: wellKnownMaxArchiveBytes + int64(wellKnownMaxArchiveFiles+2)*(3*512) + 1<<20, err: tooLarge}
+	tr := tar.NewReader(cr)
 	files := map[string][]byte{}
 	var total int64
+	entries := 0
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			if cr.exceeded {
+				return nil, tooLarge
+			}
 			return nil, fpArchiveInvalid("Invalid tar archive: " + err.Error())
+		}
+		if hdr.Size < 0 {
+			return nil, fpArchiveInvalid("Invalid tar entry size")
+		}
+		entries++
+		if entries > wellKnownMaxArchiveFiles {
+			return nil, NewDiagnostic(CodeWellknownArchiveTooManyFiles, "Archive contains too many files", "")
 		}
 		switch hdr.Typeflag {
 		case tar.TypeSymlink, tar.TypeLink:
@@ -2338,14 +2414,17 @@ func extractWellKnownTarGz(data []byte) (map[string][]byte, error) {
 		}
 		total += hdr.Size
 		if total > wellKnownMaxArchiveBytes {
-			return nil, NewDiagnostic(CodeWellknownArchiveTooLarge, "Archive exceeds maximum unpacked size", "")
-		}
-		if len(files) >= wellKnownMaxArchiveFiles {
-			return nil, NewDiagnostic(CodeWellknownArchiveTooManyFiles, "Archive contains too many files", "")
+			return nil, tooLarge
 		}
 		content, err := io.ReadAll(io.LimitReader(tr, hdr.Size))
 		if err != nil {
+			if cr.exceeded {
+				return nil, tooLarge
+			}
 			return nil, fpArchiveInvalid("Invalid tar archive: " + err.Error())
+		}
+		if int64(len(content)) != hdr.Size {
+			return nil, fpArchiveInvalid("Invalid tar archive: truncated entry")
 		}
 		files[p] = content
 	}

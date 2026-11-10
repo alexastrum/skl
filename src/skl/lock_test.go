@@ -598,3 +598,36 @@ func TestLocalLockDoesNotEscapeHTMLOrLineSeparators(t *testing.T) {
 		t.Errorf("local lock escaped characters JSON.stringify writes verbatim:\n%s", data)
 	}
 }
+
+// Review #41 item 8c: GetGitRepoTreeHash must be the hardened GetGitTreeHash (timeout, fpGitBinary,
+// overridden env), not a second exec.Command("git") implementation.
+func TestGetGitRepoTreeHashDelegatesToGetGitTreeHash(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, "skills", "demo"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "skills", "demo", "SKILL.md"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "-m", "init"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repoDir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	for _, p := range []string{"skills/demo/SKILL.md", `skills\demo\SKILL.md`, "SKILL.md"} {
+		got, want := GetGitRepoTreeHash(repoDir, p), GetGitTreeHash(repoDir, p)
+		if got != want || len(got) != 40 {
+			t.Errorf("GetGitRepoTreeHash(%q) = %q, GetGitTreeHash = %q", p, got, want)
+		}
+	}
+
+	orig := fpGitBinary
+	fpGitBinary = filepath.Join(t.TempDir(), "no-such-git")
+	defer func() { fpGitBinary = orig }()
+	if got := GetGitRepoTreeHash(repoDir, "skills/demo/SKILL.md"); got != "" {
+		t.Errorf("GetGitRepoTreeHash ignored fpGitBinary override, got %q", got)
+	}
+}

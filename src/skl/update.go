@@ -29,7 +29,13 @@ func UpdateSkill(name string, srcDir string, opts UpdateOptions) error {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	skillDir := filepath.Join(GetCanonicalSkillsDir(opts.Global, cwd), name)
+	// The name is sanitized and the result confined to the canonical dir, so a
+	// crafted name like "../../x" can never point RemoveAll outside it.
+	base := GetCanonicalSkillsDir(opts.Global, cwd)
+	skillDir := GetCanonicalPath(name, opts.Global, cwd)
+	if !lcIsStrictlyWithin(base, skillDir) {
+		return fmt.Errorf("refusing to update %q: resolves outside %s", name, base)
+	}
 	if _, err := os.Stat(skillDir); os.IsNotExist(err) {
 		return fmt.Errorf("skill %q is not installed", name)
 	}
@@ -40,7 +46,7 @@ func UpdateSkill(name string, srcDir string, opts UpdateOptions) error {
 		if _, err := os.Stat(filepath.Join(srcDir, "SKILL.md")); os.IsNotExist(err) {
 			return errors.New("source directory is missing SKILL.md")
 		}
-		if err := os.RemoveAll(skillDir); err != nil {
+		if err := lcRemoveSkillDir(base, filepath.Base(skillDir)); err != nil {
 			return fmt.Errorf("remove old skill: %w", err)
 		}
 		return CopySkillDirectory(srcDir, skillDir, "", opts.Verbose)

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -275,7 +274,9 @@ func createSymlink(target, linkPath string) bool {
 	if real, err := filepath.EvalSymlinks(linkDir); err == nil {
 		realLinkDir = real
 	}
-	rel, err := filepath.Rel(realLinkDir, installEvalOr(resolvedTarget))
+	// Resolve only the target's parents: when the target is itself a link (link mode,
+	// sync), the agent link must point at it, not at whatever it points to.
+	rel, err := filepath.Rel(realLinkDir, resolveParentSymlinks(resolvedTarget))
 	if err != nil {
 		rel = resolvedTarget
 	}
@@ -284,8 +285,9 @@ func createSymlink(target, linkPath string) bool {
 		if err := os.Symlink(resolvedTarget, linkPath); err == nil {
 			return true
 		}
-		cmd := exec.Command("cmd", "/c", "mklink", "/J", linkPath, resolvedTarget)
-		return cmd.Run() == nil
+		// No Developer Mode: fall back to a directory junction, created through the
+		// Win32 API (never through cmd.exe, which would interpret path metacharacters).
+		return createJunction(linkPath, resolvedTarget) == nil
 	}
 	return os.Symlink(rel, linkPath) == nil
 }
