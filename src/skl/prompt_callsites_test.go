@@ -18,9 +18,15 @@ func withStdinTTY(t *testing.T, tty bool) {
 	// Ensure Unicode symbols are enabled on Windows too after lcHermetic clears CI,
 	// matching instTestEnv/testTerm so Unicode symbol assertions are OS-independent.
 	t.Setenv("WT_SESSION", "1")
-	orig := stdinIsTTY
+	t.Setenv("TERM", "xterm-256color")
+	origIn, origOut := stdinIsTTY, stdoutIsTTY
 	stdinIsTTY = func() bool { return tty }
-	t.Cleanup(func() { stdinIsTTY = orig })
+	stdoutIsTTY = func() bool { return tty }
+	RefreshColors()
+	t.Cleanup(func() {
+		stdinIsTTY, stdoutIsTTY = origIn, origOut
+		RefreshColors()
+	})
 }
 
 func plainOut(s string) string {
@@ -294,6 +300,7 @@ func TestRunFind_ExitStopsPendingSearch(t *testing.T) {
 
 func runAddKeys(t *testing.T, cwd, keys string, args ...string) (int, string, string) {
 	t.Helper()
+	t.Setenv("WT_SESSION", "1")
 	var out, errb bytes.Buffer
 	yes := true
 	code := RunAddWithIO(args, AddIO{Stdout: &out, Stderr: &errb, Stdin: strings.NewReader(keys), Cwd: cwd, Interactive: &yes})

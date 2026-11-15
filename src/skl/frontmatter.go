@@ -148,12 +148,8 @@ func ParseSkillMd(skillMdPath string, includeInternal bool) (*Skill, error) {
 		metadata = m
 	}
 
-	if metadata != nil {
-		if internal, ok := metadata["internal"].(bool); ok && internal {
-			if !includeInternal && !ShouldInstallInternalSkills() {
-				return nil, nil
-			}
-		}
+	if IsInternalSkill(metadata) && !includeInternal && !ShouldInstallInternalSkills() {
+		return nil, nil
 	}
 
 	return &Skill{
@@ -163,6 +159,32 @@ func ParseSkillMd(skillMdPath string, includeInternal bool) (*Skill, error) {
 		RawContent:  raw,
 		Metadata:    metadata,
 	}, nil
+}
+
+// IsInternalSkill reports whether a skill's metadata marks it as internal (#2702).
+// Accepts boolean true as well as string "true" and "1" (agentskills.io specifies
+// metadata as string -> string).
+func IsInternalSkill(metadata interface{}) bool {
+	if metadata == nil {
+		return false
+	}
+	var internal interface{}
+	switch m := metadata.(type) {
+	case map[string]interface{}:
+		internal = m["internal"]
+	case map[string]string:
+		internal = m["internal"]
+	default:
+		return false
+	}
+	switch v := internal.(type) {
+	case bool:
+		return v
+	case string:
+		return v == "true" || v == "1"
+	default:
+		return false
+	}
 }
 
 // checkSkillMdConfined returns SKILLS_SYMLINK_OUTSIDE_SKILL when skillMdPath is a symlink whose

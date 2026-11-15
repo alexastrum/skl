@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -57,12 +58,18 @@ var (
 	spGitHubArtifactRe = regexp.MustCompile(`^/[^/]+/[^/]+/(?:archive/|raw/|releases/(?:download/|latest/download/))`)
 	spGitLabArtifactRe = regexp.MustCompile(`/-/(?:archive|raw)/`)
 	spSSHTreeRe        = regexp.MustCompile(`^git@([^:]+):([^/]+)/([^/]+?)(?:\.git)?/tree/([^/]+)(?:/(.+))?$`)
-	spGHTreePathRe     = regexp.MustCompile(`github\.com/([^/]+)/([^/]+)/tree/([^/]+)/(.+)`)
-	spGHTreeRe         = regexp.MustCompile(`github\.com/([^/]+)/([^/]+)/tree/([^/]+)$`)
-	spGHRepoRe         = regexp.MustCompile(`github\.com/([^/]+)/([^/]+)`)
+	spPathOnHostRe     = regexp.MustCompile(`(?i)^(?:https?://)?([^/?#]*)([^?#]*)`)
+	spHostUserRe       = regexp.MustCompile(`^[^@]*@`)
+	spHostPortRe       = regexp.MustCompile(`:\d*$`)
+	spGHTreePathOnHost = regexp.MustCompile(`^/([^/]+)/([^/]+)/tree/([^/]+)(?:/(.+?))?/?$`)
+	spGHRepoOnHost     = regexp.MustCompile(`^/([^/]+)/([^/]+)`)
 	spGLTreePathRe     = regexp.MustCompile(`^(https?)://([^/]+)/(.+?)/-/tree/([^/]+)/(.+)`)
 	spGLTreeRe         = regexp.MustCompile(`^(https?)://([^/]+)/(.+?)/-/tree/([^/]+)$`)
-	spGLRepoRe         = regexp.MustCompile(`gitlab\.com/(.+?)(?:\.git)?/?$`)
+	spGLRepoOnHost     = regexp.MustCompile(`^/(.+?)(?:\.git)?/?$`)
+	spMirroredPrefixRe = regexp.MustCompile(`(?i)^(/(?:.*?/)?(?:https?://?)?(?:www\.)?(github|gitlab)\.com)(/.*)$`)
+	spMirroredGHTailRe = regexp.MustCompile(`^(/[^/]+/[^/]+?)(?:\.git)?(?:/tree/([^/]+)(?:/(.+?))?)?/?$`)
+	spMirroredGLTailRe = regexp.MustCompile(`^(/[^/]+(?:/[^/]+)*?/[^/]+?)(?:\.git)?(?:/-/tree/([^/]+)(?:/(.+?))?)?/?$`)
+	spGHFullNameRe     = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
 	spAtSkillRe        = regexp.MustCompile(`^([^/]+)/([^/@]+)@(.+)$`)
 	spShorthandRe      = regexp.MustCompile(`^([^/]+)/([^/]+)(?:/(.+?))?/?$`)
 	spAzureVersionRe   = regexp.MustCompile(`(?i)^(?:GB|GT)(.+)$`)
@@ -170,6 +177,9 @@ func looksLikeGitSource(input string) bool {
 			}
 			if strings.EqualFold(u.Hostname(), "gitlab.com") {
 				return spGitLabRepoPathRe.MatchString(p)
+			}
+			if _, _, _, ok := matchMirroredRepoPath(p); ok {
+				return true
 			}
 			segs := spNonEmptySegments(p)
 			if i := spIndexOf(segs, "_git"); i >= 0 && i < len(segs)-1 {
@@ -280,6 +290,74 @@ func azureVersionToRef(version string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// pathOnHost returns the path portion of input when its authority host is
+// host (or www.<host>), and("", false) when host only appears later in the path (#2079, #2082).
+func pathOnHost(input, host string) (string, bool) {
+	m := spPathOnHostRe.FindStringSubmatch(input)
+	if m == nil {
+		return "", false
+	}
+	hostname := strings.ToLower(spHostPortRe.ReplaceAllString(spHostUserRe.ReplaceAllString(m[1], ""), ""))
+	if hostname == host || hostname == "www."+host {
+		return m[2], true
+	}
+	return "", false
+}
+
+func matchMirroredRepoPath(pathname string) (base, ref, subpath string, ok bool) {
+	m := spMirroredPrefixRe.FindStringSubmatch(pathname)
+	if m == nil {
+		return "", "", "", false
+	}
+	prefix, forge, tail := m[1], strings.ToLower(m[2]), m[3]
+	tailRe := spMirroredGLTailRe
+	if forge == "github" {
+		tailRe = spMirroredGHTailRe
+	}
+	tm := tailRe.FindStringSubmatch(tail)
+	if tm == nil {
+		return "", "", "", false
+	}
+	return prefix + tm[1], tm[2], tm[3], true
+}
+
+func parseMirroredRepoSource(input, fragmentRef, fragmentSkillFilter string) (*ParsedSource, error) {
+	if !spIsHTTPURL(input) {
+		return nil, nil
+	}
+	u, err := url.Parse(input)
+	if err != nil {
+		return nil, nil
+	}
+	base, rawRef, rawSubpath, ok := matchMirroredRepoPath(u.EscapedPath())
+	if !ok {
+		return nil, nil
+	}
+	u.Path = base + ".git"
+	u.RawPath = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	ref := fragmentRef
+	if rawRef != "" {
+		ref = decodeFragmentValue(rawRef)
+	}
+	var subpath string
+	if rawSubpath != "" {
+		sub, err := SanitizeSubpath(decodeFragmentValue(rawSubpath))
+		if err != nil {
+			return nil, err
+		}
+		subpath = sub
+	}
+	return &ParsedSource{
+		Type:        SourceTypeGit,
+		URL:         u.String(),
+		Ref:         ref,
+		Subpath:     subpath,
+		SkillFilter: fragmentSkillFilter,
+	}, nil
 }
 
 func parseAzureReposSource(input, fragmentRef, fragmentSkillFilter string) (*ParsedSource, error) {
@@ -414,40 +492,62 @@ func ParseSource(input string, opts ...ParseSourceOptions) (ParsedSource, error)
 		return out, nil
 	}
 
-	if m := spGHTreePathRe.FindStringSubmatch(input); m != nil {
-		sub, err := SanitizeSubpath(m[4])
-		if err != nil {
-			return ParsedSource{}, err
+	if ghPath, ok := pathOnHost(input, "github.com"); ok {
+		if m := spGHTreePathOnHost.FindStringSubmatch(ghPath); m != nil {
+			out := ParsedSource{
+				Type: SourceTypeGitHub,
+				URL:  fmt.Sprintf("https://github.com/%s/%s.git", m[1], m[2]),
+				Ref:  spFirstNonEmpty(m[3], fragmentRef),
+			}
+			if m[4] != "" {
+				sub, err := SanitizeSubpath(m[4])
+				if err != nil {
+					return ParsedSource{}, err
+				}
+				out.Subpath = sub
+			}
+			return out, nil
 		}
-		return ParsedSource{Type: SourceTypeGitHub, URL: fmt.Sprintf("https://github.com/%s/%s.git", m[1], m[2]),
-			Ref: spFirstNonEmpty(m[3], fragmentRef), Subpath: sub}, nil
-	}
-	if m := spGHTreeRe.FindStringSubmatch(input); m != nil {
-		return ParsedSource{Type: SourceTypeGitHub, URL: fmt.Sprintf("https://github.com/%s/%s.git", m[1], m[2]),
-			Ref: spFirstNonEmpty(m[3], fragmentRef)}, nil
-	}
-	if m := spGHRepoRe.FindStringSubmatch(input); m != nil {
-		repo := spGitSuffixRe.ReplaceAllString(m[2], "")
-		return ParsedSource{Type: SourceTypeGitHub, URL: fmt.Sprintf("https://github.com/%s/%s.git", m[1], repo),
-			Ref: fragmentRef}, nil
+		if m := spGHRepoOnHost.FindStringSubmatch(ghPath); m != nil {
+			repo := spGitSuffixRe.ReplaceAllString(m[2], "")
+			return ParsedSource{
+				Type: SourceTypeGitHub,
+				URL:  fmt.Sprintf("https://github.com/%s/%s.git", m[1], repo),
+				Ref:  fragmentRef,
+			}, nil
+		}
 	}
 
 	if m := spGLTreePathRe.FindStringSubmatch(input); m != nil && m[2] != "github.com" && m[3] != "" {
-		sub, err := SanitizeSubpath(m[5])
-		if err != nil {
-			return ParsedSource{}, err
+		if _, _, _, isMirror := matchMirroredRepoPath("/" + m[3] + "/-/tree/" + m[4] + "/" + m[5]); !isMirror {
+			sub, err := SanitizeSubpath(m[5])
+			if err != nil {
+				return ParsedSource{}, err
+			}
+			return ParsedSource{Type: SourceTypeGitLab,
+				URL: fmt.Sprintf("%s://%s/%s.git", m[1], m[2], spGitSuffixRe.ReplaceAllString(m[3], "")),
+				Ref: spFirstNonEmpty(m[4], fragmentRef), Subpath: sub}, nil
 		}
-		return ParsedSource{Type: SourceTypeGitLab,
-			URL: fmt.Sprintf("%s://%s/%s.git", m[1], m[2], spGitSuffixRe.ReplaceAllString(m[3], "")),
-			Ref: spFirstNonEmpty(m[4], fragmentRef), Subpath: sub}, nil
 	}
 	if m := spGLTreeRe.FindStringSubmatch(input); m != nil && m[2] != "github.com" && m[3] != "" {
-		return ParsedSource{Type: SourceTypeGitLab,
-			URL: fmt.Sprintf("%s://%s/%s.git", m[1], m[2], spGitSuffixRe.ReplaceAllString(m[3], "")),
-			Ref: spFirstNonEmpty(m[4], fragmentRef)}, nil
+		if _, _, _, isMirror := matchMirroredRepoPath("/" + m[3] + "/-/tree/" + m[4]); !isMirror {
+			return ParsedSource{Type: SourceTypeGitLab,
+				URL: fmt.Sprintf("%s://%s/%s.git", m[1], m[2], spGitSuffixRe.ReplaceAllString(m[3], "")),
+				Ref: spFirstNonEmpty(m[4], fragmentRef)}, nil
+		}
 	}
-	if m := spGLRepoRe.FindStringSubmatch(input); m != nil && strings.Contains(m[1], "/") {
-		return ParsedSource{Type: SourceTypeGitLab, URL: "https://gitlab.com/" + m[1] + ".git", Ref: fragmentRef}, nil
+	if glPath, ok := pathOnHost(input, "gitlab.com"); ok {
+		if m := spGLRepoOnHost.FindStringSubmatch(glPath); m != nil && strings.Contains(m[1], "/") {
+			return ParsedSource{Type: SourceTypeGitLab, URL: "https://gitlab.com/" + m[1] + ".git", Ref: fragmentRef}, nil
+		}
+	}
+
+	mirrored, err := parseMirroredRepoSource(input, fragmentRef, fragmentSkillFilter)
+	if err != nil {
+		return ParsedSource{}, err
+	}
+	if mirrored != nil {
+		return *mirrored, nil
 	}
 
 	az, err := parseAzureReposSource(input, fragmentRef, fragmentSkillFilter)
@@ -542,6 +642,86 @@ func ParseOwnerRepo(ownerRepo string) (owner, repo string, ok bool) {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+// GitHubRepoMetadata holds repository metadata returned by GitHub's /repos/{owner}/{repo} API (#2711, #2713).
+type GitHubRepoMetadata struct {
+	Private  bool
+	FullName string
+}
+
+func isValidGitHubFullName(value string) bool {
+	if !spGHFullNameRe.MatchString(value) {
+		return false
+	}
+	_, repo, _ := strings.Cut(value, "/")
+	return repo != "." && repo != ".."
+}
+
+// FetchGitHubRepoInfo queries GitHub's /repos/{owner}/{repo} endpoint (which follows 301 redirects
+// for renamed or transferred repositories) and returns its visibility and canonical full_name (#2711, #2713).
+// Returns nil on any network, HTTP, or parse error.
+func FetchGitHubRepoInfo(owner, repo string) *GitHubRepoMetadata {
+	if githubAPIBaseOverride == "" && os.Getenv("SKILLS_API_URL") == "http://127.0.0.1:9" {
+		return nil
+	}
+	apiURL := fmt.Sprintf("%s/repos/%s/%s", githubAPIBase(), url.PathEscape(owner), url.PathEscape(repo))
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("User-Agent", "skills")
+	if tok := GetGitHubToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := providerHTTPClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+	var payload struct {
+		Private  *bool  `json:"private"`
+		FullName string `json:"full_name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil || payload.Private == nil {
+		return nil
+	}
+	fullName := ""
+	if isValidGitHubFullName(payload.FullName) {
+		fullName = payload.FullName
+	}
+	return &GitHubRepoMetadata{
+		Private:  *payload.Private,
+		FullName: fullName,
+	}
+}
+
+// LookupGitHubRepo fetches GitHub repository metadata for a github source, or returns nil (#2711).
+func LookupGitHubRepo(parsed ParsedSource) *GitHubRepoMetadata {
+	if parsed.Type != SourceTypeGitHub {
+		return nil
+	}
+	owner, repo, ok := ParseOwnerRepo(GetOwnerRepo(parsed))
+	if !ok {
+		return nil
+	}
+	return FetchGitHubRepoInfo(owner, repo)
+}
+
+var lookupGitHubRepoFn = LookupGitHubRepo
+
+// WithCanonicalGitHubRepo rewrites a github ParsedSource to use fullName when GitHub reports
+// that the repository was renamed or transferred (#2711).
+func WithCanonicalGitHubRepo(parsed ParsedSource, fullName string) ParsedSource {
+	if parsed.Type != SourceTypeGitHub || fullName == "" || GetOwnerRepo(parsed) == fullName {
+		return parsed
+	}
+	parsed.URL = "https://github.com/" + fullName + ".git"
+	return parsed
 }
 
 // ---------------------------------------------------------------------------
@@ -821,16 +1001,18 @@ func fpGitAuthError(cloneURL string, repo *fpGitHubRepoInfo, msg string, cause e
 			"  - For HTTPS: Run 'gh auth login' or configure git credentials", cloneURL).WithCause(cause)
 }
 
-// fpUpdateSubmodules best-effort initializes submodules when .gitmodules
-// exists. The file transport is excluded so untrusted .gitmodules cannot
-// reference local repositories.
-func fpUpdateSubmodules(ctx context.Context, dir string) {
+// fpUpdateSubmodules best-effort initializes submodules after cloning (#2075).
+// The file transport is excluded so untrusted .gitmodules cannot reference
+// local repositories.
+func fpUpdateSubmodules(ctx context.Context, dir string, extraEnv []string) {
 	if _, err := os.Stat(filepath.Join(dir, ".gitmodules")); err != nil {
 		return
 	}
-	env := []string{"GIT_ALLOW_PROTOCOL=" + submoduleGitProtocol}
+	env := append([]string{"GIT_ALLOW_PROTOCOL=" + submoduleGitProtocol}, extraEnv...)
 	if _, err := fpRunGit(ctx, dir, env, "submodule", "update", "--init", "--recursive", "--depth", "1"); err != nil {
-		_, _ = fpRunGit(ctx, dir, env, "submodule", "update", "--init", "--recursive")
+		if _, err2 := fpRunGit(ctx, dir, env, "submodule", "update", "--init", "--recursive"); err2 != nil {
+			fmt.Fprintln(os.Stderr, "Warning: failed to initialize Git submodules; installed skills may be incomplete.")
+		}
 	}
 }
 
@@ -866,14 +1048,14 @@ func CloneRepo(cloneURL, ref string) (string, error) {
 
 	cloneErr := fpGitClone(ctx, cloneURL, ref, tempDir, nil)
 	if cloneErr == nil {
-		fpUpdateSubmodules(ctx, tempDir)
+		fpUpdateSubmodules(ctx, tempDir, nil)
 		return tempDir, nil
 	}
 	msg := cloneErr.Error()
 
 	if refCanBeSha && IsMissingRefError(msg) {
 		if fpResetDir(tempDir) == nil && fpCloneAtSha(ctx, cloneURL, ref, tempDir, nil) == nil {
-			fpUpdateSubmodules(ctx, tempDir)
+			fpUpdateSubmodules(ctx, tempDir, nil)
 			return tempDir, nil
 		}
 	}
@@ -893,7 +1075,7 @@ func CloneRepo(cloneURL, ref string) (string, error) {
 	authFailed := fpIsGitAuthFailure(msg)
 	if authFailed && repo != nil && fpIsGitHubHTTPSCloneURL(cloneURL) {
 		if fpResetDir(tempDir) == nil && fpTryGhClone(ctx, repo, tempDir, ref) {
-			fpUpdateSubmodules(ctx, tempDir)
+			fpUpdateSubmodules(ctx, tempDir, nil)
 			return tempDir, nil
 		}
 		if fpResetDir(tempDir) == nil {
@@ -909,7 +1091,7 @@ func CloneRepo(cloneURL, ref string) (string, error) {
 				}
 			}
 			if sshErr == nil {
-				fpUpdateSubmodules(ctx, tempDir)
+				fpUpdateSubmodules(ctx, tempDir, sshEnv)
 				return tempDir, nil
 			}
 		}

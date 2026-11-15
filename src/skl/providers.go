@@ -1841,39 +1841,59 @@ func isInstallableSnapshotPath(p string) bool {
 	return true
 }
 
-func hasCompleteNestedSnapshot(tree *RepoTree, skillMdPath string, files []SkillSnapshotFile) bool {
+func hasCurrentSnapshot(tree *RepoTree, skillMdPath string, files []SkillSnapshotFile) bool {
 	folder := fpSkillFolderPath(skillMdPath)
-	if folder == "" {
-		return true
+	prefix := ""
+	if folder != "" {
+		prefix = folder + "/"
 	}
-	prefix := folder + "/"
-	have := map[string]bool{}
+	blobs := make(map[string]string)
+	for _, e := range tree.Tree {
+		if e.Type == "blob" && strings.HasPrefix(e.Path, prefix) {
+			blobs[e.Path[len(prefix):]] = e.SHA
+		}
+	}
+	var requiredPaths []string
+	if folder != "" {
+		for p := range blobs {
+			if !IsExcludedPath(p) {
+				requiredPaths = append(requiredPaths, p)
+			}
+		}
+	} else {
+		requiredPaths = []string{skillMdPath}
+	}
+	have := make(map[string]bool, len(files))
 	for _, f := range files {
 		have[f.Path] = true
 	}
-	for _, e := range tree.Tree {
-		if e.Type != "blob" || !strings.HasPrefix(e.Path, prefix) {
-			continue
+	for _, p := range requiredPaths {
+		if !have[p] {
+			return false
 		}
-		rel := e.Path[len(prefix):]
-		if isInstallableSnapshotPath(rel) && !have[rel] {
+	}
+	for _, f := range files {
+		wantSHA, ok := blobs[f.Path]
+		if !ok {
+			return false
+		}
+		sum := gitBlobSHA1([]byte(f.Contents))
+		if hex.EncodeToString(sum[:]) != wantSHA {
 			return false
 		}
 	}
 	return true
 }
 
-// fpComputeSnapshotHash hashes sorted path+contents (matches ComputeSkillFolderHash).
+// fpComputeSnapshotHash hashes non-excluded snapshot files with the portable v2 framing (#2685).
 func fpComputeSnapshotHash(files []SkillSnapshotFile) string {
-	sorted := append([]SkillSnapshotFile{}, files...)
-	coll := newLocaleCollator()
-	sort.SliceStable(sorted, func(i, j int) bool { return localePathCompare(coll, sorted[i].Path, sorted[j].Path) < 0 })
-	h := sha256.New()
-	for _, f := range sorted {
-		h.Write([]byte(f.Path))
-		h.Write([]byte(f.Contents))
+	var hashed []HashedFile
+	for _, f := range files {
+		if !IsExcludedPath(f.Path) {
+			hashed = append(hashed, HashedFile{Path: f.Path, Content: []byte(f.Contents)})
+		}
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	return HashSkillFiles(hashed)
 }
 
 // IsBlobEligible reports whether ownerRepo may use the blob fast path.
@@ -1950,7 +1970,7 @@ func TryBlobInstall(ownerRepo string, opts BlobInstallOptions) (*BlobInstallResu
 			continue
 		}
 		meta, _ := data["metadata"].(map[string]interface{})
-		if internal, _ := meta["internal"].(bool); internal && !includeInternal {
+		if IsInternalSkill(meta) && !includeInternal {
 			continue
 		}
 		safeName := SanitizeMetadata(name)
@@ -1977,8 +1997,8 @@ func TryBlobInstall(ownerRepo string, opts BlobInstallOptions) (*BlobInstallResu
 	fpMapConcurrent(len(parsed), 8, func(i int) {
 		downloads[i] = fetchSkillDownload(source, parsed[i].slug)
 	})
-	for i, d := range downloads {
-		if d == nil || !hasCompleteNestedSnapshot(tree, parsed[i].mdPath, d.Files) {
+	for _, d := range downloads {
+		if d == nil {
 			return nil, nil
 		}
 	}
@@ -1993,6 +2013,9 @@ func TryBlobInstall(ownerRepo string, opts BlobInstallOptions) (*BlobInstallResu
 				}
 			}
 			files = only
+		}
+		if !hasCurrentSnapshot(tree, p.mdPath, files) {
+			return nil, nil
 		}
 		result.Skills = append(result.Skills, BlobSkill{
 			Skill:        Skill{Name: p.name, Description: p.description, RawContent: p.content, Metadata: p.metadata},
@@ -2235,21 +2258,26 @@ func fetchWellKnownCandidatesWithHeaders(baseURL string, headers map[string]stri
 }
 
 func fpHTTPGetBytes(rawURL string, max int64) ([]byte, string, bool) {
+	data, ct, _, _, ok := fpHTTPGetBytesStatus(rawURL, max)
+	return data, ct, ok
+}
+
+func fpHTTPGetBytesStatus(rawURL string, max int64) (data []byte, contentType string, status int, hasStatus bool, ok bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	resp, err := providerGet(ctx, rawURL, nil)
 	if err != nil {
-		return nil, "", false
+		return nil, "", 0, false, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, "", false
+		return nil, "", resp.StatusCode, true, false
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
-	if err != nil || int64(len(data)) > max {
-		return nil, "", false
+	body, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+	if err != nil || int64(len(body)) > max {
+		return nil, "", resp.StatusCode, true, false
 	}
-	return data, resp.Header.Get("Content-Type"), true
+	return body, resp.Header.Get("Content-Type"), resp.StatusCode, true, true
 }
 
 func newWellKnownSkill(name, description, content, installName, sourceURL string, metadata interface{},
@@ -2262,7 +2290,15 @@ func newWellKnownSkill(name, description, content, installName, sourceURL string
 	}
 }
 
-func fetchLegacyWellKnownSkill(e wellKnownEntry) *WellKnownSkill {
+// DiscoveredWellKnownSkill holds metadata and SKILL.md for a well-known skill, with lazy
+// loading of supporting files for v0.1.0 entries (#2386).
+type DiscoveredWellKnownSkill struct {
+	WellKnownSkill
+	FilePaths []string
+	Load      func() (*WellKnownSkill, error)
+}
+
+func discoverLegacyWellKnownSkill(e wellKnownEntry) *DiscoveredWellKnownSkill {
 	skillBase := strings.TrimSuffix(e.baseURL, "/") + "/" + e.wellKnownDir + "/" + e.name
 	mdURL := skillBase + "/SKILL.md"
 	data, _, ok := fpHTTPGetBytes(mdURL, 16*1024*1024)
@@ -2279,25 +2315,60 @@ func fetchLegacyWellKnownSkill(e wellKnownEntry) *WellKnownSkill {
 	if !ok1 || !ok2 {
 		return nil
 	}
-	files := map[string][]byte{"SKILL.md": data}
 	var others []string
 	for _, f := range e.files {
 		if strings.ToLower(f) != "skill.md" {
 			others = append(others, f)
 		}
 	}
-	results := make([][]byte, len(others))
-	fpMapConcurrent(len(others), 8, func(i int) {
-		if b, _, ok := fpHTTPGetBytes(skillBase+"/"+others[i], 16*1024*1024); ok {
-			results[i] = b
-		}
-	})
-	for i, f := range others {
-		if results[i] != nil {
-			files[f] = results[i]
-		}
+	filePaths := append([]string{"SKILL.md"}, others...)
+	base := newWellKnownSkill(name, desc, content, e.name, mdURL, fm["metadata"], map[string][]byte{"SKILL.md": data}, e)
+	var cached *WellKnownSkill
+	var cachedErr error
+	var loaded bool
+	return &DiscoveredWellKnownSkill{
+		WellKnownSkill: *base,
+		FilePaths:      filePaths,
+		Load: func() (*WellKnownSkill, error) {
+			if loaded {
+				return cached, cachedErr
+			}
+			loaded = true
+			if len(others) == 0 {
+				cached = base
+				return cached, nil
+			}
+			type otherFetch struct {
+				data      []byte
+				status    int
+				hasStatus bool
+				ok        bool
+			}
+			results := make([]otherFetch, len(others))
+			fpMapConcurrent(len(others), 8, func(i int) {
+				b, _, st, hasSt, ok := fpHTTPGetBytesStatus(skillBase+"/"+others[i], 16*1024*1024)
+				results[i] = otherFetch{data: b, status: st, hasStatus: hasSt, ok: ok}
+			})
+			files := map[string][]byte{"SKILL.md": data}
+			for i, f := range others {
+				if !results[i].ok {
+					cachedErr = ErrWellKnownFileFetchFailed(SanitizeMetadata(e.name), SanitizeMetadata(f), results[i].status, results[i].hasStatus)
+					return nil, cachedErr
+				}
+				files[f] = results[i].data
+			}
+			cached = newWellKnownSkill(name, desc, content, e.name, mdURL, fm["metadata"], files, e)
+			return cached, nil
+		},
 	}
-	return newWellKnownSkill(name, desc, content, e.name, mdURL, fm["metadata"], files, e)
+}
+
+func fetchLegacyWellKnownSkill(e wellKnownEntry) (*WellKnownSkill, error) {
+	d := discoverLegacyWellKnownSkill(e)
+	if d == nil {
+		return nil, nil
+	}
+	return d.Load()
 }
 
 func fpSHA256Digest(b []byte) string {
@@ -2446,20 +2517,36 @@ func extractWellKnownTarGz(data []byte) (map[string][]byte, error) {
 	return files, nil
 }
 
+func discoverWellKnownEntry(e wellKnownEntry) (*DiscoveredWellKnownSkill, error) {
+	if e.version == "0.1.0" {
+		return discoverLegacyWellKnownSkill(e), nil
+	}
+	wk, err := fetchArtifactWellKnownSkill(e)
+	if err != nil || wk == nil {
+		return nil, err
+	}
+	filePaths := make([]string, 0, len(wk.Files))
+	for k := range wk.Files {
+		filePaths = append(filePaths, k)
+	}
+	sort.Strings(filePaths)
+	return &DiscoveredWellKnownSkill{
+		WellKnownSkill: *wk,
+		FilePaths:      filePaths,
+		Load:           func() (*WellKnownSkill, error) { return wk, nil },
+	}, nil
+}
+
 func fetchWellKnownEntry(e wellKnownEntry) (*WellKnownSkill, error) {
 	if e.version == "0.1.0" {
-		return fetchLegacyWellKnownSkill(e), nil
+		return fetchLegacyWellKnownSkill(e)
 	}
 	return fetchArtifactWellKnownSkill(e)
 }
 
-// FetchWellKnownSkills fetches every skill published at rawURL's well-known
-// index (/.well-known/agent-skills, then /.well-known/skills; path-relative
-// first). Scoped URLs never widen to the root index
-// (SKILLS_WELLKNOWN_SCOPE_NOT_FOUND) and v0.2.0 digest mismatches fail
-// (SKILLS_WELLKNOWN_DIGEST_MISMATCH) without any fallback. Other failures
-// yield an empty result.
-func FetchWellKnownSkills(rawURL string, includeInternal bool) ([]*WellKnownSkill, error) {
+// DiscoverWellKnownSkills discovers every skill published at rawURL's well-known
+// index without downloading v0.1.0 supporting files until Load() is called (#2386).
+func DiscoverWellKnownSkills(rawURL string, includeInternal bool) ([]*DiscoveredWellKnownSkill, error) {
 	candidates := fetchWellKnownCandidates(rawURL)
 	var scopePath, rootBase string
 	if pu, err := url.Parse(rawURL); err == nil {
@@ -2477,22 +2564,22 @@ func FetchWellKnownSkills(rawURL string, includeInternal bool) ([]*WellKnownSkil
 	}
 	includeInternal = includeInternal || ShouldInstallInternalSkills()
 	for _, c := range scoped {
-		results := make([]*WellKnownSkill, len(c.entries))
+		results := make([]*DiscoveredWellKnownSkill, len(c.entries))
 		errs := make([]error, len(c.entries))
 		fpMapConcurrent(len(c.entries), 8, func(i int) {
-			results[i], errs[i] = fetchWellKnownEntry(c.entries[i])
+			results[i], errs[i] = discoverWellKnownEntry(c.entries[i])
 		})
 		for _, err := range errs {
 			if IsDiagnostic(err, CodeWellknownDigestMismatch) {
 				return nil, err
 			}
 		}
-		var skills []*WellKnownSkill
+		var skills []*DiscoveredWellKnownSkill
 		for _, s := range results {
 			if s == nil {
 				continue
 			}
-			if internal, _ := s.Metadata["internal"].(bool); internal && !includeInternal {
+			if IsInternalSkill(s.Metadata) && !includeInternal {
 				continue
 			}
 			skills = append(skills, s)
@@ -2505,6 +2592,30 @@ func FetchWellKnownSkills(rawURL string, includeInternal bool) ([]*WellKnownSkil
 		return nil, ErrWellKnownScope(scopePath, rootBase)
 	}
 	return nil, nil
+}
+
+// FetchWellKnownSkills fetches every skill published at rawURL's well-known
+// index (/.well-known/agent-skills, then /.well-known/skills; path-relative
+// first). Scoped URLs never widen to the root index
+// (SKILLS_WELLKNOWN_SCOPE_NOT_FOUND), v0.2.0 digest mismatches fail
+// (SKILLS_WELLKNOWN_DIGEST_MISMATCH), and missing v0.1.0 supporting files fail
+// (SKILLS_WELLKNOWN_FILE_FETCH_FAILED) without any fallback (#2386).
+func FetchWellKnownSkills(rawURL string, includeInternal bool) ([]*WellKnownSkill, error) {
+	discovered, err := DiscoverWellKnownSkills(rawURL, includeInternal)
+	if err != nil || len(discovered) == 0 {
+		return nil, err
+	}
+	skills := make([]*WellKnownSkill, len(discovered))
+	errs := make([]error, len(discovered))
+	fpMapConcurrent(len(discovered), 8, func(i int) {
+		skills[i], errs[i] = discovered[i].Load()
+	})
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return skills, nil
 }
 
 // ComputeWellKnownSkillDigest returns the v0.2.0 index digest, or a sha256
@@ -2632,6 +2743,12 @@ type SourceRequest struct {
 	Cwd string
 	// GitHubHost pins the shorthand host (see ParseSourceOptions).
 	GitHubHost string
+	// DeferWellKnownLoad stages only SKILL.md for well-known v0.1.0 skills until
+	// FetchedSkill.LoadWellKnown() is called for selected skills (#2386).
+	DeferWellKnownLoad bool
+	// LockedSkillPaths optionally lists locked SKILL.md relative paths to read
+	// directly from a cloned repo before falling back to full discovery (#2721, #2726).
+	LockedSkillPaths []string
 }
 
 // FetchedSkill is one discovered skill materialized on local disk.
@@ -2655,6 +2772,28 @@ type FetchedSkill struct {
 	SourceURL string
 	// PackPointer is set for skills.sh pack entries carrying a source pointer.
 	PackPointer *PackSkillPointer
+	// WellKnownFilePaths lists the files declared for a well-known skill (#2386).
+	WellKnownFilePaths []string
+	wellKnownLoader    func() (*WellKnownSkill, error)
+}
+
+// LoadWellKnown downloads supporting files for a deferred well-known skill and
+// writes them to fs.Path (#2386). No-op for non-well-known or already loaded skills.
+func (fs *FetchedSkill) LoadWellKnown() error {
+	if fs == nil || fs.wellKnownLoader == nil {
+		return nil
+	}
+	loader := fs.wellKnownLoader
+	fs.wellKnownLoader = nil
+	wk, err := loader()
+	if err != nil {
+		return err
+	}
+	if err := fpWriteSkillFiles(fs.Path, wk.Files); err != nil {
+		return err
+	}
+	fs.WellKnownDigest = ComputeWellKnownSkillDigest(wk)
+	return nil
 }
 
 // PackSkillPointer is a skills.sh pack entry's upstream pointer (#2651).
@@ -2854,12 +2993,22 @@ func FetchSource(req SourceRequest) (*FetchedSource, error) {
 
 	case SourceTypeWellKnown, SourceTypeDownload:
 		if parsed.Type == SourceTypeWellKnown {
-			wk, err := FetchWellKnownSkills(parsed.URL, includeInternal)
-			if err != nil {
-				return nil, err
-			}
-			if len(wk) > 0 {
-				return materializeWellKnown(out, parsed, wk)
+			if req.DeferWellKnownLoad {
+				wk, err := DiscoverWellKnownSkills(parsed.URL, includeInternal)
+				if err != nil {
+					return nil, err
+				}
+				if len(wk) > 0 {
+					return materializeDiscoveredWellKnown(out, parsed, wk)
+				}
+			} else {
+				wk, err := FetchWellKnownSkills(parsed.URL, includeInternal)
+				if err != nil {
+					return nil, err
+				}
+				if len(wk) > 0 {
+					return materializeWellKnown(out, parsed, wk)
+				}
 			}
 		}
 		var dl *DownloadedSource
@@ -2922,6 +3071,12 @@ func FetchSource(req SourceRequest) (*FetchedSource, error) {
 	out.TempDir = cloneDir
 	out.RootDir = cloneDir
 	out.Via = "clone"
+	if len(req.LockedSkillPaths) > 0 && parsed.Subpath == "" {
+		if locked := readLockedCloneSkills(cloneDir, req.LockedSkillPaths, includeInternal); len(locked) > 0 {
+			out.Skills = locked
+			return out, nil
+		}
+	}
 	skills, err := discover(cloneDir)
 	if err != nil {
 		return fail(err)
@@ -2930,6 +3085,42 @@ func FetchSource(req SourceRequest) (*FetchedSource, error) {
 		out.Skills = append(out.Skills, FetchedSkill{Skill: s, SkillPath: fpRelSkillPath(cloneDir, s.Path)})
 	}
 	return out, nil
+}
+
+func isRealpathWithin(realRoot, targetPath string) bool {
+	real, err := filepath.EvalSymlinks(targetPath)
+	if err != nil {
+		return false
+	}
+	real = filepath.Clean(real)
+	return real == realRoot || strings.HasPrefix(real, strings.TrimSuffix(realRoot, string(filepath.Separator))+string(filepath.Separator))
+}
+
+func readLockedCloneSkills(tempDir string, skillPaths []string, includeInternal bool) []FetchedSkill {
+	realRoot, err := filepath.EvalSymlinks(tempDir)
+	if err != nil {
+		return nil
+	}
+	realRoot = filepath.Clean(realRoot)
+	var skills []FetchedSkill
+	for _, sp := range skillPaths {
+		if sp == "" || !IsSubpathSafe(tempDir, sp) {
+			return nil
+		}
+		skillMdPath := filepath.Join(tempDir, filepath.FromSlash(sp))
+		if _, err := os.Stat(skillMdPath); err != nil {
+			return nil
+		}
+		if !isRealpathWithin(realRoot, filepath.Dir(skillMdPath)) || !isRealpathWithin(realRoot, skillMdPath) {
+			return nil
+		}
+		skill, err := ParseSkillMd(skillMdPath, includeInternal)
+		if err != nil || skill == nil {
+			return nil
+		}
+		skills = append(skills, FetchedSkill{Skill: *skill, SkillPath: fpRelSkillPath(tempDir, skill.Path)})
+	}
+	return skills
 }
 
 // cloneOrDownloadRepo clones the repo, or (skl feature) downloads a GitHub
@@ -3016,6 +3207,40 @@ func materializeBlob(out *FetchedSource, blob *BlobInstallResult) (*FetchedSourc
 		out.Skills = append(out.Skills, FetchedSkill{
 			Skill: s, SkillPath: b.RepoPath, FolderHash: GetSkillFolderHashFromTree(blob.Tree, b.RepoPath), ComputedHash: hash,
 		})
+	}
+	return out, nil
+}
+
+func materializeDiscoveredWellKnown(out *FetchedSource, parsed ParsedSource, skills []*DiscoveredWellKnownSkill) (*FetchedSource, error) {
+	tmp, err := os.MkdirTemp("", "skills-wellknown-")
+	if err != nil {
+		return nil, err
+	}
+	out.TempDir = tmp
+	out.RootDir = tmp
+	out.Via = "well-known"
+	out.SourceType = SourceTypeWellKnown
+	out.Source = GetWellKnownSourceIdentifier(parsed.URL)
+	out.SourceURL = parsed.URL
+	isPack := IsSkillsShPackURL(parsed.URL)
+	for _, d := range skills {
+		dir := filepath.Join(tmp, SanitizeName(d.InstallName))
+		if err := fpWriteSkillFiles(dir, d.Files); err != nil {
+			_ = out.Cleanup()
+			return nil, err
+		}
+		fs := FetchedSkill{
+			Skill:              Skill{Name: d.InstallName, Description: d.Description, Path: dir, RawContent: d.Content, Metadata: d.Metadata},
+			WellKnownDigest:    d.Digest,
+			InstallName:        d.InstallName,
+			SourceURL:          d.SourceURL,
+			WellKnownFilePaths: d.FilePaths,
+			wellKnownLoader:    d.Load,
+		}
+		if isPack {
+			fs.PackPointer = GetPackSkillPointer(&d.WellKnownSkill)
+		}
+		out.Skills = append(out.Skills, fs)
 	}
 	return out, nil
 }

@@ -69,51 +69,38 @@ func errUseAgentUnsupported(a AgentType) *DiagnosticError {
 		"Supported agents for skills use --agent: "+strings.Join(supportedUseAgentNames(), ", "))
 }
 
-// ParseUseOptions parses `skl use` arguments (upstream parseUseOptions).
+var useOptionSpec = map[string]CLIOptionSpec{
+	"help":       {Type: CLIOptionBoolean, Short: "h"},
+	"full-depth": {Type: CLIOptionBoolean},
+	"skill":      {Type: CLIOptionString, Short: "s", Value: "a skill name"},
+	"agent":      {Type: CLIOptionList, Short: "a", Value: "an agent name"},
+}
+
+// ParseUseOptions parses `skl use` arguments (upstream parseUseOptions, #2712).
 func ParseUseOptions(args []string) ParseUseResult {
 	var res ParseUseResult
 	opts := &res.Options
-	agentFlag := false
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "" {
-			continue
-		}
-		switch {
-		case arg == "--help" || arg == "-h":
-			opts.Help = true
-		case arg == "--full-depth":
-			opts.FullDepth = true
-		case arg == "--skill" || arg == "-s":
-			if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "-") {
-				res.Errors = append(res.Errors, ErrOptionRequiresValue(arg, "a skill name"))
-			} else if opts.Skill != "" {
-				res.Errors = append(res.Errors, ErrDuplicateOption("--skill"))
-				i++
-			} else {
-				opts.Skill = args[i+1]
-				i++
-			}
-		case arg == "--agent" || arg == "-a":
-			agentFlag = true
-			start := len(opts.Agent)
-			j := i + 1
-			for j < len(args) && args[j] != "" && !strings.HasPrefix(args[j], "-") {
-				opts.Agent = append(opts.Agent, AgentType(args[j]))
-				j++
-			}
-			if len(opts.Agent) == start {
-				res.Errors = append(res.Errors, ErrOptionRequiresValue(arg, "an agent name"))
-			}
-			i = j - 1
-		case strings.HasPrefix(arg, "-"):
-			res.Errors = append(res.Errors, ErrUnknownOption(arg))
-		default:
-			res.Sources = append(res.Sources, arg)
+	cli := ParseCLIArgs(args, useOptionSpec)
+	for _, e := range cli.Errors {
+		res.Errors = append(res.Errors, e)
+	}
+	res.Sources = append(res.Sources, cli.Positionals...)
+	opts.Help = cli.Bools["help"]
+	opts.FullDepth = cli.Bools["full-depth"]
+	if skills := cli.Strings["skill"]; len(skills) > 0 {
+		opts.Skill = skills[len(skills)-1]
+		for i := 1; i < len(skills); i++ {
+			res.Errors = append(res.Errors, ErrDuplicateOption("--skill"))
 		}
 	}
-	if agentFlag {
+	if agents, ok := cli.Strings["agent"]; ok {
+		for _, a := range agents {
+			opts.Agent = append(opts.Agent, AgentType(a))
+		}
 		res.Errors = append(res.Errors, validateUseAgentOption(opts.Agent)...)
+	}
+	for _, flag := range cli.Unknown {
+		res.Errors = append(res.Errors, ErrUnknownOption(flag))
 	}
 	return res
 }
@@ -296,7 +283,11 @@ func selectUseSkill(fetched *FetchedSource, selector, source string) (FetchedSki
 	}
 	if selector == "" {
 		if len(skills) == 1 {
-			return skills[0], nil
+			chosen := skills[0]
+			if err := chosen.LoadWellKnown(); err != nil {
+				return FetchedSkill{}, err
+			}
+			return chosen, nil
 		}
 		return FetchedSkill{}, ErrMultipleSkillsInSource("skl", source, names)
 	}
@@ -317,7 +308,11 @@ func selectUseSkill(fetched *FetchedSource, selector, source string) (FetchedSki
 	if len(selected) > 1 {
 		return FetchedSkill{}, ErrAmbiguousSkillSelector(selector)
 	}
-	return selected[0], nil
+	chosen := selected[0]
+	if err := chosen.LoadWellKnown(); err != nil {
+		return FetchedSkill{}, err
+	}
+	return chosen, nil
 }
 
 // RunUse runs `skl use` with os streams and returns the exit code.
@@ -390,7 +385,7 @@ func RunUseWithIO(args []string, uio UseIO) int {
 	}
 	fetched, err := fetchSourceFn(SourceRequest{
 		Source: source, Parsed: &parsed, Skills: requested, FullDepth: opts.FullDepth,
-		NoFullDepthRetry: true, IncludeInternal: selector != "", Yes: true, Cwd: cwd,
+		NoFullDepthRetry: true, IncludeInternal: selector != "", Yes: true, Cwd: cwd, DeferWellKnownLoad: true,
 	})
 	if err != nil {
 		if fetched != nil {

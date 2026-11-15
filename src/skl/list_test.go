@@ -273,12 +273,16 @@ func TestRunList_InvalidAgent(t *testing.T) {
 func TestRunList_JSONStatus(t *testing.T) {
 	lcHermetic(t)
 	cwd := t.TempDir()
-	lcWriteSkill(t, filepath.Join(cwd, ".agents", "skills", "tracked"), "tracked", "d")
+	trackedDir := filepath.Join(cwd, ".agents", "skills", "tracked")
+	ceDir := filepath.Join(cwd, ".agents", "skills", "ce-review")
+	lcWriteSkill(t, trackedDir, "tracked", "d")
 	lcWriteSkill(t, filepath.Join(cwd, ".agents", "skills", "loose"), "loose", "d")
-	lcWriteSkill(t, filepath.Join(cwd, ".agents", "skills", "ce-review"), "ce-review", "d")
+	lcWriteSkill(t, ceDir, "ce-review", "d")
+	trackedHash, _ := ComputeSkillFolderHash(trackedDir)
+	ceHash, _ := ComputeSkillFolderHash(ceDir)
 	lcWriteLocalLock(t, cwd, map[string]LocalSkillLockEntry{
-		"tracked":   {Source: "owner/repo", SourceType: "github", ComputedHash: "h"},
-		"ce:review": {Source: "owner/plugins", SourceType: "github", ComputedHash: "h"},
+		"tracked":   {Source: "owner/repo", SourceType: "github", ComputedHash: trackedHash},
+		"ce:review": {Source: "owner/plugins", SourceType: "github", ComputedHash: ceHash},
 		"gone":      {Source: "owner/gone", SourceType: "github", ComputedHash: "h"},
 	})
 

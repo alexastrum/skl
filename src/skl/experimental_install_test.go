@@ -104,11 +104,12 @@ func TestRunInstallFromLock_LinksAlreadyInstalled(t *testing.T) {
 	cwd := t.TempDir()
 	src := lcLocalSource(t, "alpha", "upstream")
 	canonical := filepath.Join(cwd, ".agents", "skills", "alpha")
+	betaDir := filepath.Join(cwd, ".agents", "skills", "beta")
 	lcWriteSkill(t, canonical, "alpha", "locally edited")
-	lcWriteSkill(t, filepath.Join(cwd, ".agents", "skills", "beta"), "beta", "d")
+	lcWriteSkill(t, betaDir, "beta", "d")
 	lcWriteLocalLock(t, cwd, map[string]LocalSkillLockEntry{
-		"alpha": {Source: src, SourceType: "local", ComputedHash: "h", InstallMode: "copy"},
-		"beta":  {Source: lcLocalSource(t, "beta", "upstream"), SourceType: "local", ComputedHash: "h"},
+		"alpha": {Source: src, SourceType: "local", ComputedHash: lcHash(t, canonical), InstallMode: "copy"},
+		"beta":  {Source: lcLocalSource(t, "beta", "upstream"), SourceType: "local", ComputedHash: lcHash(t, betaDir)},
 	})
 	code, out, errOut := lcRunInstall(t, cwd, "-a", "claude-code")
 	if code != 0 {

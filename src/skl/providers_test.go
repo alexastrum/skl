@@ -828,6 +828,26 @@ func startBlobServer(t *testing.T, fx blobFixture) *provServer {
 	t.Setenv("PATH", t.TempDir()) // no gh/git: never shell out to the network
 	srv := newProvServer(t)
 	if fx.tree != nil {
+		for i := range fx.tree.Tree {
+			e := &fx.tree.Tree[i]
+			if e.Type != "blob" || !strings.HasPrefix(e.SHA, "sha-") {
+				continue
+			}
+			if c, ok := fx.raw[e.Path]; ok {
+				sum := gitBlobSHA1([]byte(c))
+				e.SHA = hex.EncodeToString(sum[:])
+				continue
+			}
+			for _, files := range fx.snapshots {
+				for _, f := range files {
+					if e.Path == f.Path || strings.HasSuffix(e.Path, "/"+f.Path) {
+						sum := gitBlobSHA1([]byte(f.Contents))
+						e.SHA = hex.EncodeToString(sum[:])
+						break
+					}
+				}
+			}
+		}
 		for _, branch := range []string{"HEAD", "main", "master"} {
 			srv.setJSON(t, "/api/repos/vercel-labs/demo/git/trees/"+branch, map[string]interface{}{"sha": fx.tree.SHA, "tree": fx.tree.Tree})
 		}
@@ -897,9 +917,9 @@ func TestTryBlobInstallRootSkillOnlySkillMD(t *testing.T) {
 		t.Fatalf("skill = %+v", s)
 	}
 	provEqual(t, snapPaths(s.Files), []string{"SKILL.md"})
-	wantHash := sha256.Sum256([]byte("SKILL.md" + md))
-	if s.SnapshotHash != hex.EncodeToString(wantHash[:]) {
-		t.Fatalf("snapshot hash should cover only SKILL.md")
+	wantHash := HashSkillFiles([]HashedFile{{Path: "SKILL.md", Content: []byte(md)}})
+	if s.SnapshotHash != wantHash {
+		t.Fatalf("snapshot hash = %s, want %s", s.SnapshotHash, wantHash)
 	}
 	if res.Tree == nil || res.Tree.Branch != "HEAD" {
 		t.Fatalf("tree = %+v", res.Tree)
@@ -1141,7 +1161,7 @@ func TestFetchWellKnownSkillsV1Files(t *testing.T) {
 	srv.set("/.well-known/skills/foo/SKILL.md", []byte(md))
 	srv.set("/.well-known/skills/foo/refs/ref.md", []byte("ref"))
 	srv.setJSON(t, "/.well-known/skills/index.json", wkV1Index(map[string]interface{}{
-		"name": "foo", "description": "Foo", "files": []string{"SKILL.md", "refs/ref.md", "missing.md"},
+		"name": "foo", "description": "Foo", "files": []string{"SKILL.md", "refs/ref.md"},
 	}))
 	skills, err := FetchWellKnownSkills(srv.URL+"/", false)
 	if err != nil || len(skills) != 1 {
@@ -1154,6 +1174,16 @@ func TestFetchWellKnownSkillsV1Files(t *testing.T) {
 	if s.SourceURL != srv.URL+"/.well-known/skills/foo/SKILL.md" {
 		t.Fatalf("source url = %q", s.SourceURL)
 	}
+
+	// #2386: a missing supporting file fails with SKILLS_WELLKNOWN_FILE_FETCH_FAILED.
+	srv.setJSON(t, "/.well-known/skills/index.json", wkV1Index(map[string]interface{}{
+		"name": "foo", "description": "Foo", "files": []string{"SKILL.md", "refs/ref.md", "missing.md"},
+	}))
+	skills, err = FetchWellKnownSkills(srv.URL+"/", false)
+	if skills != nil {
+		t.Fatalf("expected nil skills on missing supporting file, got %v", skills)
+	}
+	provWantCode(t, err, CodeWellknownFileFetchFailed)
 }
 
 func TestFetchWellKnownSkillsInvalidIndexes(t *testing.T) {

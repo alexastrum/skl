@@ -91,6 +91,7 @@ type UpdateCheckOptions struct {
 	ReportOutdated func(name string)
 	Stdout         io.Writer
 	Stdin          io.Reader
+	Errors         []*DiagnosticError
 
 	term *promptTerm
 }
@@ -123,23 +124,25 @@ func (o *UpdateCheckOptions) prompter() *promptTerm {
 // updateFetch materializes a source for update checks (overridable in tests).
 var updateFetch = FetchSource
 
-// ParseUpdateOptions parses `skl update` / `skl check` arguments.
+var updateOptionSpec = map[string]CLIOptionSpec{
+	"global":  {Type: CLIOptionBoolean, Short: "g"},
+	"project": {Type: CLIOptionBoolean, Short: "p"},
+	"yes":     {Type: CLIOptionBoolean, Short: "y"},
+	"verbose": {Type: CLIOptionBoolean, Short: "v"},
+}
+
+// ParseUpdateOptions parses `skl update` / `skl check` arguments (#2712).
 func ParseUpdateOptions(args []string) UpdateCheckOptions {
 	var opts UpdateCheckOptions
-	for _, arg := range args {
-		switch arg {
-		case "-g", "--global":
-			opts.Global = true
-		case "-p", "--project":
-			opts.Project = true
-		case "-y", "--yes":
-			opts.Yes = true
-		case "-v", "--verbose":
-			opts.Verbose = true
-		default:
-			if arg != "" && !strings.HasPrefix(arg, "-") {
-				opts.Skills = append(opts.Skills, arg)
-			}
+	cli := ParseCLIArgs(args, updateOptionSpec)
+	opts.Errors = cli.Errors
+	opts.Global = cli.Bools["global"]
+	opts.Project = cli.Bools["project"]
+	opts.Yes = cli.Bools["yes"]
+	opts.Verbose = cli.Bools["verbose"]
+	for _, p := range cli.Positionals {
+		if p != "" {
+			opts.Skills = append(opts.Skills, p)
 		}
 	}
 	return opts
@@ -321,9 +324,9 @@ func printFetching(w io.Writer, n int) {
 }
 
 // printCheckingSource prints the per-source progress line. Like upstream it
-// returns to column 0 and clears the rest of the line.
+// returns to column 0 and clears the rest of the line when stdout is a TTY (#2716).
 func printCheckingSource(w io.Writer, source string) {
-	fmt.Fprintf(w, "\r%sChecking skills from source: %s%s\x1b[K\n", ansiDim, source, ansiReset)
+	fmt.Fprintf(w, "%s%sChecking skills from source: %s%s\n", ClearLine(), ansiDim, source, ansiReset)
 }
 
 // fetchAllForUpdate runs updateFetch over reqs with at most FetchConcurrency()
@@ -662,11 +665,17 @@ func checkWellKnownForUpdates(baseURL string, items []wellKnownItem) wellKnownCh
 			}
 		}
 		skills := make([]*WellKnownSkill, len(toFetch))
+		errs := make([]error, len(toFetch))
 		fpMapConcurrent(len(toFetch), 8, func(i int) {
-			if s, err := fetchWellKnownEntry(toFetch[i]); err == nil {
-				skills[i] = s
-			}
+			skills[i], errs[i] = fetchWellKnownEntry(toFetch[i])
 		})
+		incomplete := map[string]bool{}
+		for i, err := range errs {
+			if IsDiagnostic(err, CodeWellknownFileFetchFailed) {
+				incomplete[toFetch[i].name] = true
+				skills[i] = nil
+			}
+		}
 		digests := map[string]string{}
 		fetched := 0
 		for _, s := range skills {
@@ -679,6 +688,9 @@ func checkWellKnownForUpdates(baseURL string, items []wellKnownItem) wellKnownCh
 			return wellKnownCheck{status: "error"}
 		}
 		for _, it := range needsContent {
+			if incomplete[it.name] {
+				continue
+			}
 			if d, ok := digests[it.name]; !ok || it.digest == "" || d != it.digest {
 				res.changed = append(res.changed, it.name)
 			}
@@ -1016,7 +1028,9 @@ func UpdateGlobalSkills(opts *UpdateCheckOptions) (success, fail, checked int) {
 		_ = fetched.Cleanup()
 	}
 	if len(checkable) > 0 {
-		fmt.Fprint(w, "\r\x1b[K")
+		if cl := ClearLine(); cl != "" {
+			fmt.Fprint(w, cl)
+		}
 	}
 
 	checked = len(checkable) + len(skipped) + otherCount
@@ -1248,8 +1262,22 @@ func UpdateProjectSkills(opts *UpdateCheckOptions) (success, fail, found int, er
 		if cloneSources[i] == "" {
 			return
 		}
-		first := groups[groupKeys[i]][0].entry
-		clones[i], cloneErrs[i] = updateFetch(SourceRequest{Source: FormatSourceInput(cloneSources[i], first.Ref), Skills: []string{"*"}, FullDepth: true, IncludeDuplicateNames: true, NoBlob: true, Yes: true, Cwd: cwd})
+		group := groups[groupKeys[i]]
+		first := group[0].entry
+		source := nonEmpty(first.SourceUrl, first.Source)
+		var lockedPaths []string
+		if !ShouldUseFullDepthForUpdate(UpdateSourceFromLocal(first)) {
+			for _, n := range keysOf(latestLock.Skills) {
+				if e := latestLock.Skills[n]; nonEmpty(e.SourceUrl, e.Source) == source && e.Ref == first.Ref {
+					lockedPaths = append(lockedPaths, e.SkillPath)
+				}
+			}
+		}
+		clones[i], cloneErrs[i] = updateFetch(SourceRequest{
+			Source: FormatSourceInput(cloneSources[i], first.Ref), Skills: []string{"*"},
+			FullDepth: true, IncludeDuplicateNames: true, NoBlob: true, Yes: true, Cwd: cwd,
+			LockedSkillPaths: lockedPaths,
+		})
 	})
 
 	for i, key := range groupKeys {
@@ -1346,15 +1374,46 @@ func printLegacyProjectSkills(w io.Writer, legacy []projectSkill) {
 	}
 }
 
+func reportModifiedProjectSkills(w io.Writer, cwd string, skillFilter []string) int {
+	lock, err := ReadLocalLock(cwd)
+	if err != nil {
+		return 0
+	}
+	installed, _ := ListInstalledSkills(ListOptions{Global: false, Cwd: cwd})
+	installedAt := make(map[string]string, len(installed))
+	for _, s := range installed {
+		installedAt[SanitizeName(s.Name)] = s.CanonicalPath
+	}
+	modified := 0
+	for _, name := range keysOf(lock.Skills) {
+		if !MatchesSkillFilter(name, skillFilter) {
+			continue
+		}
+		entry := lock.Skills[name]
+		if GetLockedSkillState(name, entry, cwd, installedAt[SanitizeName(name)]) == "modified" {
+			modified++
+			fmt.Fprintf(w, "%s✎ %s has local changes%s\n", ansiText, SanitizeMetadata(name), ansiReset)
+		}
+	}
+	return modified
+}
+
 // RunUpdate implements `skl update` (mode update) and `skl check` (mode check),
 // returning the process exit code. check never installs anything and exits 1
-// when any skill has an update (#2605).
+// when any skill has an update (#2605) or local changes (#2685).
 func RunUpdate(args []string, mode UpdateMode, cwd string) int {
 	return runUpdate(args, mode, cwd, os.Stdout, os.Stderr, os.Stdin)
 }
 
 func runUpdate(args []string, mode UpdateMode, cwd string, stdout, stderr io.Writer, stdin io.Reader) int {
+	RefreshColors(args...)
 	opts := ParseUpdateOptions(args)
+	if len(opts.Errors) > 0 {
+		for _, e := range opts.Errors {
+			fmt.Fprintln(stderr, FormatError(e))
+		}
+		return 1
+	}
 	opts.Cwd, opts.Stdout, opts.Stdin = cwd, stdout, stdin
 	opts.cwd()
 	outdated := 0
@@ -1376,6 +1435,7 @@ func runUpdate(args []string, mode UpdateMode, cwd string, stdout, stderr io.Wri
 	}
 
 	totalSuccess, totalFail, totalFound := 0, 0, 0
+	modifiedCount := 0
 	both := scope == UpdateScopeBoth && len(opts.Skills) == 0
 	if scope == UpdateScopeGlobal || scope == UpdateScopeBoth {
 		if both {
@@ -1397,6 +1457,9 @@ func runUpdate(args []string, mode UpdateMode, cwd string, stdout, stderr io.Wri
 			return 1
 		}
 		totalSuccess, totalFail, totalFound = totalSuccess+s, totalFail+f, totalFound+c
+		if mode == UpdateModeCheck {
+			modifiedCount = reportModifiedProjectSkills(stdout, opts.cwd(), opts.Skills)
+		}
 	}
 
 	if len(opts.Skills) > 0 && totalFound == 0 {
@@ -1413,6 +1476,10 @@ func runUpdate(args []string, mode UpdateMode, cwd string, stdout, stderr io.Wri
 	}
 	if outdated > 0 {
 		fmt.Fprintf(stdout, "%s%d skill(s) can be updated; run %sskl update%s%s to install%s\n", ansiText, outdated, ansiBold, ansiReset, ansiText, ansiReset)
+		code = 1
+	}
+	if modifiedCount > 0 {
+		fmt.Fprintf(stdout, "%s%d skill(s) differ from skills-lock.json; run %sskl install --force%s%s to restore them%s\n", ansiText, modifiedCount, ansiBold, ansiReset, ansiText, ansiReset)
 		code = 1
 	}
 	fmt.Fprintln(stdout)
