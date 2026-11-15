@@ -300,6 +300,7 @@ func TestRunFind_ExitStopsPendingSearch(t *testing.T) {
 
 func runAddKeys(t *testing.T, cwd, keys string, args ...string) (int, string, string) {
 	t.Helper()
+	t.Setenv("WT_SESSION", "1")
 	var out, errb bytes.Buffer
 	yes := true
 	code := RunAddWithIO(args, AddIO{Stdout: &out, Stderr: &errb, Stdin: strings.NewReader(keys), Cwd: cwd, Interactive: &yes})
