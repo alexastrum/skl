@@ -248,7 +248,7 @@ func TestCategoryDirectoryGuards(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "conflicts with category: Claude Code (foo/ contains bar)") {
+	if !strings.Contains(StripTerminalEscapes(stdout), "conflicts with category: Claude Code (foo/ contains bar)") {
 		t.Errorf("missing conflict summary line in stdout:\n%s", stdout)
 	}
 	if !strings.Contains(stderr, "[SKILLS_CATEGORY_DIR_CONFLICT]") {

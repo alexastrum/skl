@@ -27,10 +27,12 @@ func instTestEnv(t *testing.T) (string, string) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".state"))
-	for _, k := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "VIBE_HOME", "HERMES_HOME", "AUTOHAND_HOME", "GROK_HOME", "SARVAM_HOME", "REASONIX_HOME"} {
+	for _, k := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "VIBE_HOME", "HERMES_HOME", "AUTOHAND_HOME", "GROK_HOME", "SARVAM_HOME", "REASONIX_HOME", "CI", "NO_COLOR", "FORCE_COLOR"} {
 		t.Setenv(k, "")
 	}
 	RefreshAgents()
+	RefreshColors()
+	t.Cleanup(func() { RefreshColors() })
 	return home, cwd
 }
 
