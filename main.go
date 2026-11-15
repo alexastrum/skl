@@ -12,15 +12,15 @@ import (
 )
 
 // upstreamVersion is the vercel-labs/skills release that skl tracks.
-const upstreamVersion = "1.7.6"
+const upstreamVersion = "1.8.1"
 
 // version is the skl version. It mirrors upstreamVersion with the major
-// version set to 0 (skills 1.7.6 -> skl 0.7.6); TestVersionMirrorsUpstream
+// version set to 0 (skills 1.8.1 -> skl 0.8.1); TestVersionMirrorsUpstream
 // enforces this. It is a var so release builds can set it with
 // -ldflags "-X main.version=...".
-var version = "0.7.6"
+var version = "0.8.1"
 
-const (
+var (
 	reset = "\x1b[0m"
 	bold  = "\x1b[1m"
 	dim   = "\x1b[38;5;102m"
@@ -39,6 +39,25 @@ var logoLines = []string{
 var logoGrays = []string{
 	"\x1b[38;5;250m", "\x1b[38;5;248m", "\x1b[38;5;245m",
 	"\x1b[38;5;243m", "\x1b[38;5;240m", "\x1b[38;5;238m",
+}
+
+func refreshMainColors(args ...string) {
+	if skl.RefreshColors(args...) {
+		reset = "\x1b[0m"
+		bold = "\x1b[1m"
+		dim = "\x1b[38;5;102m"
+		text = "\x1b[38;5;145m"
+		logoGrays = []string{
+			"\x1b[38;5;250m", "\x1b[38;5;248m", "\x1b[38;5;245m",
+			"\x1b[38;5;243m", "\x1b[38;5;240m", "\x1b[38;5;238m",
+		}
+		return
+	}
+	reset = ""
+	bold = ""
+	dim = ""
+	text = ""
+	logoGrays = []string{"", "", "", "", "", ""}
 }
 
 func showLogo(w io.Writer) {
@@ -374,6 +393,7 @@ func main() {
 
 // run executes one CLI invocation and returns the exit code.
 func run(args []string, stdout, stderr io.Writer) int {
+	refreshMainColors(args...)
 	inAgent := skl.IsRunningInAgent()
 	if len(args) == 0 {
 		if !inAgent {

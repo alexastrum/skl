@@ -12,6 +12,7 @@ const (
 	// Command line.
 	CodeInvalidAgents         = "SKILLS_INVALID_AGENTS"
 	CodeOptionRequiresValue   = "SKILLS_OPTION_REQUIRES_VALUE"
+	CodeOptionTakesNoValue    = "SKILLS_OPTION_TAKES_NO_VALUE"
 	CodeUnknownOption         = "SKILLS_UNKNOWN_OPTION"
 	CodeInvalidOptionValue    = "SKILLS_INVALID_OPTION_VALUE"
 	CodeDuplicateOption       = "SKILLS_DUPLICATE_OPTION"
@@ -20,7 +21,9 @@ const (
 	CodeMissingArgument       = "SKILLS_MISSING_ARGUMENT"
 	CodeMultipleSources       = "SKILLS_MULTIPLE_SOURCES"
 	CodeUnknownCommand        = "SKILLS_UNKNOWN_COMMAND"
-	CodeRemoveGloballyTracked = "SKILLS_REMOVE_GLOBALLY_TRACKED"
+	CodeRemoveGloballyTracked  = "SKILLS_REMOVE_GLOBALLY_TRACKED"
+	CodeRemoveUntrackedSkipped = "SKILLS_REMOVE_UNTRACKED_SKIPPED"
+	CodeRemoveUnmanagedDirKept = "SKILLS_REMOVE_UNMANAGED_DIR_KEPT"
 
 	// Sources and skill selection.
 	CodeUnsafeSubpath             = "SKILLS_UNSAFE_SUBPATH"
@@ -33,6 +36,7 @@ const (
 	CodeLocalPathNotFound         = "SKILLS_LOCAL_PATH_NOT_FOUND"
 	CodeWellknownScopeNotFound    = "SKILLS_WELLKNOWN_SCOPE_NOT_FOUND"
 	CodeWellknownDigestMismatch   = "SKILLS_WELLKNOWN_DIGEST_MISMATCH"
+	CodeWellknownFileFetchFailed  = "SKILLS_WELLKNOWN_FILE_FETCH_FAILED"
 	CodeWellknownIndexNotFound    = "SKILLS_WELLKNOWN_INDEX_NOT_FOUND"
 	CodeSkillSkipped              = "SKILLS_SKILL_SKIPPED"
 
@@ -74,6 +78,7 @@ const (
 	CodeInvalidLocalLock      = "SKILLS_INVALID_LOCAL_LOCK"
 	CodeSymlinkOutsideSkill   = "SKILLS_SYMLINK_OUTSIDE_SKILL"
 	CodeSymlinkCycle          = "SKILLS_SYMLINK_CYCLE"
+	CodeCategoryDirConflict   = "SKILLS_CATEGORY_DIR_CONFLICT"
 
 	// package.json "skills" field.
 	CodePackageSkillsNotArray      = "SKILLS_PACKAGE_SKILLS_NOT_ARRAY"
@@ -257,9 +262,10 @@ func availableSkillsFix(names []string) string {
 
 // Sentinel diagnostics usable with errors.Is (matched by code only).
 var (
-	ErrWellKnownDigestMismatch = &DiagnosticError{Code: CodeWellknownDigestMismatch}
-	ErrWellKnownScopeNotFound  = &DiagnosticError{Code: CodeWellknownScopeNotFound}
-	ErrWellKnownIndexNotFound  = &DiagnosticError{Code: CodeWellknownIndexNotFound}
+	ErrWellKnownDigestMismatch          = &DiagnosticError{Code: CodeWellknownDigestMismatch}
+	ErrWellKnownScopeNotFound           = &DiagnosticError{Code: CodeWellknownScopeNotFound}
+	ErrWellKnownIndexNotFound           = &DiagnosticError{Code: CodeWellknownIndexNotFound}
+	ErrWellKnownFileFetchFailedSentinel = &DiagnosticError{Code: CodeWellknownFileFetchFailed}
 )
 
 // Constructors for diagnostics shared across commands. Messages match
@@ -275,6 +281,11 @@ func ErrInvalidAgents(invalid, valid []string) *DiagnosticError {
 // ErrOptionRequiresValue reports a flag missing its value ("--skill requires a skill name").
 func ErrOptionRequiresValue(option, value string) *DiagnosticError {
 	return Diagnosticf(CodeOptionRequiresValue, "%s requires %s", option, value)
+}
+
+// ErrOptionTakesNoValue reports a boolean flag passed an inline =value.
+func ErrOptionTakesNoValue(option string) *DiagnosticError {
+	return Diagnosticf(CodeOptionTakesNoValue, "%s does not take a value", option)
 }
 
 // ErrUnknownOption reports an unrecognized flag.
@@ -328,6 +339,20 @@ func ErrRemoveGloballyTracked(skills []string) *DiagnosticError {
 	return NewDiagnostic(CodeRemoveGloballyTracked,
 		"Tracked in the global lock: "+strings.Join(skills, ", "),
 		"Remove globally with: skills remove "+strings.Join(skills, " ")+" -g")
+}
+
+// ErrRemoveUntrackedSkipped reports untracked project skills skipped during `remove --all`.
+func ErrRemoveUntrackedSkipped(skills []string) *DiagnosticError {
+	return NewDiagnostic(CodeRemoveUntrackedSkipped,
+		fmt.Sprintf("Skipped %d untracked skill(s) not recorded in the lock file: %s", len(skills), strings.Join(skills, ", ")),
+		"Remove them by name, e.g. skills remove <name>")
+}
+
+// ErrRemoveUnmanagedDirKept reports keeping a collision-prone project agent directory that was not installed by skills.
+func ErrRemoveUnmanagedDirKept(path string) *DiagnosticError {
+	return NewDiagnostic(CodeRemoveUnmanagedDirKept,
+		fmt.Sprintf("Kept %s: it is not an unmodified copy installed by skills", path),
+		"Delete it by hand if you no longer need it")
 }
 
 // ErrUnsafeSubpath reports a subpath containing ".." segments.
@@ -401,6 +426,31 @@ func ErrWellKnownScope(scopePath, rootURL string) *DiagnosticError {
 func ErrWellKnownDigest(skill, expected, actual string) *DiagnosticError {
 	return Diagnosticf(CodeWellknownDigestMismatch,
 		"Digest mismatch for skill '%s': expected %s, received %s.", skill, expected, actual)
+}
+
+// ErrWellKnownFileFetchFailed reports a supporting file in a well-known skill failing to download.
+func ErrWellKnownFileFetchFailed(skill, path string, status int, hasStatus bool) *DiagnosticError {
+	suffix := "."
+	if hasStatus {
+		suffix = fmt.Sprintf(" (HTTP %d).", status)
+	}
+	return Diagnosticf(CodeWellknownFileFetchFailed,
+		"Failed to download %q for skill %q%s The skill cannot be installed without all listed files.",
+		path, skill, suffix)
+}
+
+// ErrCategoryDirConflict reports an install target that is a category directory containing nested skills.
+func ErrCategoryDirConflict(path string, skills []string) *DiagnosticError {
+	shown := skills
+	ellipsis := ""
+	if len(shown) > 8 {
+		shown = shown[:8]
+		ellipsis = ", ..."
+	}
+	return NewDiagnostic(CodeCategoryDirConflict,
+		fmt.Sprintf("Refusing to replace %s: it is a category directory with nested skills (%s%s). Installing would delete them.",
+			path, strings.Join(shown, ", "), ellipsis),
+		"Move or rename the category directory, then install again.")
 }
 
 // ErrWellKnownIndex reports a URL without a well-known index.

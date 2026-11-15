@@ -32,60 +32,60 @@ type SyncOptions struct {
 	NoRemote bool
 	// FrozenLockfile: true (--frozen-lockfile), false (--no-frozen-lockfile), nil = IsCI().
 	FrozenLockfile *bool
-	Recursive      bool     // -r/--recursive: include workspace packages
-	Include        []string // --include <pkg>[#<skill>] globs
-	Exclude        []string // --exclude <pkg>[#<skill>] globs
-	JSON           bool     // --json: machine-readable summary on stdout
+	Recursive      bool               // -r/--recursive: include workspace packages
+	Include        []string           // --include <pkg>[#<skill>] globs
+	Exclude        []string           // --exclude <pkg>[#<skill>] globs
+	JSON           bool               // --json: machine-readable summary on stdout
+	Errors         []*DiagnosticError // CLI option parse errors (#2712)
 }
 
-// ParseSyncOptions parses sync/install flags. -a/--agent, --include and --exclude
-// consume every following non-flag token (agents may also be comma-separated).
+var syncOptionSpec = map[string]CLIOptionSpec{
+	"yes":                {Type: CLIOptionBoolean, Short: "y"},
+	"force":              {Type: CLIOptionBoolean, Short: "f"},
+	"verbose":            {Type: CLIOptionBoolean, Short: "v"},
+	"copy":               {Type: CLIOptionBoolean},
+	"dry-run":            {Type: CLIOptionBoolean},
+	"no-cleanup":         {Type: CLIOptionBoolean},
+	"no-remote":          {Type: CLIOptionBoolean},
+	"frozen-lockfile":    {Type: CLIOptionBoolean},
+	"no-frozen-lockfile": {Type: CLIOptionBoolean},
+	"recursive":          {Type: CLIOptionBoolean, Short: "r"},
+	"json":               {Type: CLIOptionBoolean},
+	"agent":              {Type: CLIOptionList, Short: "a", Value: "an agent name"},
+	"include":            {Type: CLIOptionList, Value: "a pattern"},
+	"exclude":            {Type: CLIOptionList, Value: "a pattern"},
+}
+
+// ParseSyncOptions parses sync/install flags (#2712). -a/--agent, --include and --exclude
+// consume every following non-flag token (or inline =values and comma-separated lists).
 func ParseSyncOptions(args []string) SyncOptions {
 	var opts SyncOptions
-	take := func(i *int) []string {
-		var vals []string
-		for *i+1 < len(args) && !strings.HasPrefix(args[*i+1], "-") {
-			*i++
-			vals = append(vals, args[*i])
-		}
-		return vals
-	}
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-y", "--yes":
-			opts.Yes = true
-		case "-f", "--force":
-			opts.Force = true
-		case "-v", "--verbose":
-			opts.Verbose = true
-		case "--copy":
-			opts.Copy = true
-		case "--dry-run":
-			opts.DryRun = true
-		case "--no-cleanup":
-			opts.NoCleanup = true
-		case "--no-remote":
-			opts.NoRemote = true
-		case "--frozen-lockfile":
+	cli := ParseCLIArgs(args, syncOptionSpec)
+	opts.Errors = cli.Errors
+	opts.Yes = cli.Bools["yes"]
+	opts.Force = cli.Bools["force"]
+	opts.Verbose = cli.Bools["verbose"]
+	opts.Copy = cli.Bools["copy"]
+	opts.DryRun = cli.Bools["dry-run"]
+	opts.NoCleanup = cli.Bools["no-cleanup"]
+	opts.NoRemote = cli.Bools["no-remote"]
+	opts.Recursive = cli.Bools["recursive"]
+	opts.JSON = cli.Bools["json"]
+	for _, flag := range cli.FlagOrder {
+		switch flag {
+		case "frozen-lockfile":
 			t := true
 			opts.FrozenLockfile = &t
-		case "--no-frozen-lockfile":
+		case "no-frozen-lockfile":
 			f := false
 			opts.FrozenLockfile = &f
-		case "-r", "--recursive":
-			opts.Recursive = true
-		case "--json":
-			opts.JSON = true
-		case "-a", "--agent":
-			for _, v := range take(&i) {
-				opts.Agent = append(opts.Agent, splitAgentList(v)...)
-			}
-		case "--include":
-			opts.Include = append(opts.Include, take(&i)...)
-		case "--exclude":
-			opts.Exclude = append(opts.Exclude, take(&i)...)
 		}
 	}
+	for _, tok := range cli.Strings["agent"] {
+		opts.Agent = append(opts.Agent, splitAgentList(tok)...)
+	}
+	opts.Include = append(opts.Include, cli.Strings["include"]...)
+	opts.Exclude = append(opts.Exclude, cli.Strings["exclude"]...)
 	return opts
 }
 
@@ -845,6 +845,14 @@ func runSync(opts SyncOptions, cwd string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(jsonOut, string(data))
 		}
 		return code
+	}
+	RefreshColors()
+	if len(opts.Errors) > 0 {
+		for _, e := range opts.Errors {
+			fmt.Fprintln(stderr, FormatError(e))
+			result.Failed = append(result.Failed, SyncJSONSkill{Name: "cli", Reason: FormatError(e)})
+		}
+		return finish(1)
 	}
 
 	if det := DetectAgent(); det.IsAgent {

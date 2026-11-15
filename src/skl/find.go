@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,48 +51,36 @@ type FoundSkill struct {
 // add command by the CLI). It returns a process exit code.
 var FindInstallFunc func(source, skillName string) int
 
+var findOptionSpec = map[string]CLIOptionSpec{
+	"owner": {Type: CLIOptionString, Value: "a GitHub owner"},
+	"local": {Type: CLIOptionBoolean, Short: "l"},
+	"json":  {Type: CLIOptionBoolean, Short: "j"},
+}
+
 // ParseFindOptions splits `skl find` arguments into a query (all non-flag words
-// joined by spaces) and options, collecting diagnostics for invalid --owner values.
+// joined by spaces) and options, collecting diagnostics for invalid --owner values (#2712).
 func ParseFindOptions(args []string) (string, FindOptions, []error) {
 	var opts FindOptions
-	var parts []string
 	var errs []error
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "" {
-			continue
-		}
-		var owner string
-		switch {
-		case arg == "--owner":
-			if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "-") {
-				errs = append(errs, ErrOptionRequiresValue("--owner", "a GitHub owner"))
-				continue
-			}
-			owner = args[i+1]
-			i++
-		case strings.HasPrefix(arg, "--owner="):
-			owner = strings.TrimPrefix(arg, "--owner=")
-			if owner == "" {
-				errs = append(errs, ErrOptionRequiresValue("--owner", "a GitHub owner"))
-				continue
-			}
-		case arg == "-l" || arg == "--local":
-			opts.Local = true
-			continue
-		case arg == "-j" || arg == "--json":
-			opts.JSON = true
-			continue
-		default:
-			parts = append(parts, arg)
-			continue
-		}
-		owner = strings.ToLower(strings.TrimSpace(owner))
+	cli := ParseCLIArgs(args, findOptionSpec)
+	for _, e := range cli.Errors {
+		errs = append(errs, e)
+	}
+	opts.Local = cli.Bools["local"]
+	opts.JSON = cli.Bools["json"]
+	for _, rawOwner := range cli.Strings["owner"] {
+		owner := strings.ToLower(strings.TrimSpace(rawOwner))
 		if !githubOwnerPattern.MatchString(owner) {
 			errs = append(errs, ErrInvalidOptionValue("--owner", "a valid GitHub owner"))
 			continue
 		}
 		opts.Owner = owner
+	}
+	var parts []string
+	for _, p := range cli.Positionals {
+		if p != "" {
+			parts = append(parts, p)
+		}
 	}
 	opts.Query = strings.Join(parts, " ")
 	return opts.Query, opts, errs
@@ -144,6 +133,115 @@ func SearchSkillsAPI(query, owner string) ([]FoundSkill, error) {
 	return out, nil
 }
 
+const (
+	minExactResults  = 10
+	maxFallbackTerms = 6
+	maxMergedResults = 25
+)
+
+// FindSearchResult holds remote search results and the count of exact matches (#2731).
+type FindSearchResult struct {
+	Skills     []FoundSkill
+	ExactCount int
+}
+
+// SearchSkills searches the skills.sh API, falling back to N-1 term subqueries when a
+// 2..6 term query returns fewer than 10 exact matches (#2731).
+func SearchSkills(query, owner string) (FindSearchResult, error) {
+	exact, err := findSearchFn(query, owner)
+	if err != nil {
+		return FindSearchResult{Skills: exact, ExactCount: len(exact)}, err
+	}
+	var terms []string
+	seenTerm := map[string]bool{}
+	for _, t := range strings.Fields(strings.TrimSpace(query)) {
+		if !seenTerm[t] {
+			seenTerm[t] = true
+			terms = append(terms, t)
+		}
+	}
+	if len(exact) >= minExactResults || len(terms) < 2 || len(terms) > maxFallbackTerms {
+		return FindSearchResult{Skills: exact, ExactCount: len(exact)}, nil
+	}
+
+	subqueries := make([]string, len(terms))
+	for i := range terms {
+		var sub []string
+		sub = append(sub, terms[:i]...)
+		sub = append(sub, terms[i+1:]...)
+		subqueries[i] = strings.Join(sub, " ")
+	}
+	subResults := make([][]FoundSkill, len(subqueries))
+	var wg sync.WaitGroup
+	for i, sq := range subqueries {
+		wg.Add(1)
+		go func(idx int, q string) {
+			defer wg.Done()
+			res, _ := findSearchFn(q, owner)
+			subResults[idx] = res
+		}(i, sq)
+	}
+	wg.Wait()
+
+	skillKey := func(s FoundSkill) string {
+		if s.Slug != "" {
+			return s.Slug
+		}
+		return s.Name
+	}
+	seen := make(map[string]bool, len(exact))
+	for _, s := range exact {
+		seen[skillKey(s)] = true
+	}
+	type partialCandidate struct {
+		skill    FoundSkill
+		hits     int
+		bestRank int
+	}
+	var order []string
+	bySlug := map[string]*partialCandidate{}
+	for _, list := range subResults {
+		for rank, s := range list {
+			k := skillKey(s)
+			if seen[k] {
+				continue
+			}
+			if c, ok := bySlug[k]; ok {
+				c.hits++
+				if rank < c.bestRank {
+					c.bestRank = rank
+				}
+			} else {
+				bySlug[k] = &partialCandidate{skill: s, hits: 1, bestRank: rank}
+				order = append(order, k)
+			}
+		}
+	}
+	candidates := make([]*partialCandidate, len(order))
+	for i, k := range order {
+		candidates[i] = bySlug[k]
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		a, b := candidates[i], candidates[j]
+		if a.hits != b.hits {
+			return a.hits > b.hits
+		}
+		if a.bestRank != b.bestRank {
+			return a.bestRank < b.bestRank
+		}
+		return a.skill.Installs > b.skill.Installs
+	})
+	limit := max(0, maxMergedResults-len(exact))
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	merged := append([]FoundSkill{}, exact...)
+	for _, c := range candidates {
+		merged = append(merged, c.skill)
+	}
+	return FindSearchResult{Skills: merged, ExactCount: len(exact)}, nil
+}
+
 // FindSkills searches installed project and global skills (opts.Local) or the
 // skills.sh API (otherwise).
 func FindSkills(opts FindOptions) ([]FoundSkill, error) {
@@ -151,7 +249,8 @@ func FindSkills(opts FindOptions) ([]FoundSkill, error) {
 		if opts.Query == "" {
 			return []FoundSkill{}, nil
 		}
-		return SearchSkillsAPI(opts.Query, opts.Owner)
+		res, err := SearchSkills(opts.Query, opts.Owner)
+		return res.Skills, err
 	}
 	q := strings.ToLower(opts.Query)
 	found := []FoundSkill{}
@@ -204,6 +303,7 @@ func RunFind(args []string, cwd string) int {
 }
 
 func runFind(args []string, cwd string, stdout, stderr io.Writer, stdin io.Reader) int {
+	RefreshColors(args...)
 	query, opts, errs := ParseFindOptions(args)
 	opts.Cwd = cwd
 	if len(errs) > 0 {
@@ -243,7 +343,8 @@ func runFind(args []string, cwd string, stdout, stderr io.Writer, stdin io.Reade
 	}
 
 	if query != "" {
-		results, _ := SearchSkillsAPI(query, opts.Owner)
+		res, _ := SearchSkills(query, opts.Owner)
+		results := res.Skills
 		if opts.JSON {
 			return printJSON(results)
 		}
@@ -256,7 +357,14 @@ func runFind(args []string, cwd string, stdout, stderr io.Writer, stdin io.Reade
 			return 0
 		}
 		fmt.Fprintf(stdout, "%sInstall with%s skl add <owner/repo@skill>\n\n", ansiDim, ansiReset)
-		for _, s := range results {
+		for i, s := range results {
+			if i == res.ExactCount {
+				if res.ExactCount == 0 {
+					fmt.Fprintf(stdout, "%sNo skills matched every term in %q. Partial matches:%s\n\n", ansiDim, query, ansiReset)
+				} else {
+					fmt.Fprintf(stdout, "%sPartial matches (some terms of %q):%s\n\n", ansiDim, query, ansiReset)
+				}
+			}
 			printFoundSkill(stdout, s)
 		}
 		return 0
@@ -332,7 +440,7 @@ func runSearchPrompt(t *promptTerm, owner string) *FoundSkill {
 	defer end()
 	// Read the overridable hooks once so timer goroutines never touch the
 	// package globals, which tests restore when they finish.
-	searchFn, debounceFn := findSearchFn, findDebounce
+	debounceFn := findDebounce
 
 	var (
 		mu       sync.Mutex
@@ -406,7 +514,8 @@ func runSearchPrompt(t *promptTerm, owner string) *FoundSkill {
 			if stale {
 				return
 			}
-			res, err := searchFn(q, owner)
+			sr, err := SearchSkills(q, owner)
+			res := sr.Skills
 			mu.Lock()
 			defer mu.Unlock()
 			if closed || mine != gen {

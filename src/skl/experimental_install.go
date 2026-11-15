@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -110,17 +109,24 @@ func RunInstallFromLock(args []string, cwd string) int {
 }
 
 func runInstallFromLock(args []string, cwd string, stdout, stderr io.Writer) int {
+	RefreshColors(args...)
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
 	opts := ParseSyncOptions(args)
+	if len(opts.Errors) > 0 {
+		for _, e := range opts.Errors {
+			fmt.Fprintln(stderr, FormatError(e))
+		}
+		return 1
+	}
 	frozen := IsCI()
 	if opts.FrozenLockfile != nil {
 		frozen = *opts.FrozenLockfile
 	}
 	force := opts.Force
 
-	lock, err := ReadLocalLock(cwd)
+	lock, err := ReadLocalLockWithOptions(cwd, ReadLocalLockOptions{PersistMigration: !frozen && !opts.DryRun})
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %s\n", FormatError(err))
 		return 1
@@ -148,7 +154,7 @@ func runInstallFromLock(args []string, cwd string, stdout, stderr io.Writer) int
 	}
 
 	exit := 0
-	var nodeModules, already, failedSkills []string
+	var nodeModules, already, modified, failedSkills []string
 	var groupKeys []string
 	groups := map[string]*restoreGroup{}
 	for _, name := range keysOf(lock.Skills) {
@@ -158,9 +164,13 @@ func runInstallFromLock(args []string, cwd string, stdout, stderr io.Writer) int
 			continue
 		}
 		if !force {
-			if _, err := os.Stat(filepath.Join(GetCanonicalPath(name, false, cwd), "SKILL.md")); err == nil {
+			state := GetLockedSkillState(name, e, cwd, GetCanonicalPath(name, false, cwd))
+			if state == "tracked" {
 				already = append(already, name)
 				continue
+			}
+			if state == "modified" {
+				modified = append(modified, name)
 			}
 		}
 		src := BuildLocalUpdateSource(UpdateSourceFromLocal(e))
@@ -186,6 +196,22 @@ func runInstallFromLock(args []string, cwd string, stdout, stderr io.Writer) int
 
 	if len(already) > 0 {
 		fmt.Fprintf(stdout, "%s%d%s skill%s already installed %s(use --force to reinstall)%s\n", ansiCyan, len(already), ansiReset, plural(len(already)), ansiDim, ansiReset)
+	}
+	if len(modified) > 0 {
+		colored := make([]string, len(modified))
+		for i, n := range modified {
+			colored[i] = ansiYellow + n + ansiReset
+		}
+		doesOrDo := "do"
+		if len(modified) == 1 {
+			doesOrDo = "does"
+		}
+		restoreVerb := "restoring"
+		if opts.DryRun {
+			restoreVerb = "would restore"
+		}
+		fmt.Fprintf(stdout, "%s %s not match skills-lock.json; %s the locked version\n",
+			strings.Join(colored, ", "), doesOrDo, restoreVerb)
 	}
 	verb, linkVerb := "Restoring", "Linking"
 	if opts.DryRun {

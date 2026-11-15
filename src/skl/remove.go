@@ -16,46 +16,67 @@ type RemoveOptions struct {
 	Agent  []AgentType
 	Yes    bool
 	All    bool
+	Errors []*DiagnosticError
 }
 
-// ParseRemoveOptions parses `skl remove` arguments into skill names and options.
-// `-s/--skill` and `-a/--agent` consume every following non-flag token; `--all`
-// implies `-y`; unknown flags are ignored rather than treated as skill names.
+var removeOptionSpec = map[string]CLIOptionSpec{
+	"global":  {Type: CLIOptionBoolean, Short: "g"},
+	"project": {Type: CLIOptionBoolean, Short: "p"},
+	"yes":     {Type: CLIOptionBoolean, Short: "y"},
+	"all":     {Type: CLIOptionBoolean},
+	"skill":   {Type: CLIOptionList, Short: "s", Value: "a skill name"},
+	"agent":   {Type: CLIOptionList, Short: "a", Value: "an agent name"},
+}
+
+// ParseRemoveOptions parses `skl remove` arguments into skill names and options (#2712).
+// `-s/--skill` and `-a/--agent` consume every following non-flag token (or inline =values
+// and comma-separated lists); `--all` implies `-y`; unknown flags are ignored rather than
+// treated as skill names.
 func ParseRemoveOptions(args []string) ([]string, RemoveOptions) {
 	var opts RemoveOptions
 	skills := []string{}
-	for i := 0; i < len(args); i++ {
-		switch arg := args[i]; arg {
-		case "-g", "--global":
+	cli := ParseCLIArgs(args, removeOptionSpec)
+	opts.Errors = cli.Errors
+	for _, flag := range cli.FlagOrder {
+		switch flag {
+		case "global":
 			opts.Global = true
-		case "-p", "--project":
+		case "project":
 			opts.Global = false
-		case "-y", "--yes":
-			opts.Yes = true
-		case "--all":
-			opts.All = true
-			opts.Yes = true
-		case "-s", "--skill":
-			for i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				i++
-				for _, part := range strings.Split(args[i], ",") {
-					if p := strings.TrimSpace(part); p != "" {
-						skills = append(skills, p)
-					}
-				}
-			}
-		case "-a", "--agent":
-			for i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				i++
-				opts.Agent = append(opts.Agent, splitAgentList(args[i])...)
-			}
-		default:
-			if arg != "" && !strings.HasPrefix(arg, "-") {
-				skills = append(skills, arg)
+		}
+	}
+	opts.Yes = cli.Bools["yes"]
+	if cli.Bools["all"] {
+		opts.All = true
+		opts.Yes = true
+	}
+	for _, tok := range cli.Strings["skill"] {
+		for _, part := range strings.Split(tok, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				skills = append(skills, p)
 			}
 		}
 	}
+	for _, tok := range cli.Strings["agent"] {
+		opts.Agent = append(opts.Agent, splitAgentList(tok)...)
+	}
+	skills = append(skills, cli.Positionals...)
 	return skills, opts
+}
+
+// FindUntrackedSkills returns installed folder names whose sanitized name is not in lockKeys (#2715).
+func FindUntrackedSkills(folderNames, lockKeys []string) []string {
+	tracked := make(map[string]bool, len(lockKeys))
+	for _, k := range lockKeys {
+		tracked[SanitizeName(k)] = true
+	}
+	var out []string
+	for _, f := range folderNames {
+		if !tracked[SanitizeName(f)] {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // ResolveSkillsToRemove maps requested names onto removal targets. Folder names and
@@ -211,6 +232,38 @@ type RemoveInstalledOptions struct {
 	OnWarn       func(string)
 }
 
+// isUnmanagedProjectDir reports whether skillPath is a collision-prone project agent
+// directory (one whose first path segment under cwd is not a hidden dot-directory, such
+// as OpenClaw's `skills/<name>`) that is NOT an unmodified copy recorded in skills-lock.json
+// (#1771, #2073). Symlinks are checked by the caller before calling this helper.
+func isUnmanagedProjectDir(skillPath, cwd string, entry *LocalSkillLockEntry) bool {
+	rel, err := filepath.Rel(cwd, skillPath)
+	if err != nil {
+		return false
+	}
+	firstSeg := strings.Split(rel, string(filepath.Separator))[0]
+	if strings.HasPrefix(firstSeg, ".") {
+		return false
+	}
+	if entry == nil {
+		return true
+	}
+	if entry.SourceType == "local" && entry.Source != "" {
+		src := entry.Source
+		if !filepath.IsAbs(src) {
+			src = filepath.Join(cwd, filepath.FromSlash(src))
+		}
+		if PathsOverlap(src, skillPath) {
+			return true
+		}
+	}
+	hash, err := ComputeSkillFolderHash(skillPath)
+	if err != nil {
+		return true
+	}
+	return hash != entry.ComputedHash
+}
+
 // RemoveInstalledSkills removes skills from the target agents without prompting.
 // The canonical copy and lock entry are deleted only when no remaining detected
 // agent still uses the skill (reference-counted cleanup).
@@ -226,10 +279,26 @@ func RemoveInstalledSkills(skills []string, opts RemoveInstalledOptions) []Remov
 			targets = append(targets, AgentType(k))
 		}
 	}
+	var projectLock *LocalSkillLockFile
+	if !isGlobal {
+		if ll, err := ReadLocalLock(cwd); err == nil {
+			projectLock = &ll
+		}
+	}
 	results := make([]RemoveSkillResult, 0, len(skills))
 	for _, skillName := range skills {
 		canonicalPath := GetCanonicalPath(skillName, isGlobal, cwd)
 		sanitized := SanitizeName(skillName)
+		var lockEntry *LocalSkillLockEntry
+		if projectLock != nil {
+			if e, ok := projectLock.Skills[skillName]; ok {
+				cp := e
+				lockEntry = &cp
+			} else if k := lockKeyFor(skillName, keysOf(projectLock.Skills)); k != "" {
+				cp := projectLock.Skills[k]
+				lockEntry = &cp
+			}
+		}
 		for _, a := range targets {
 			cfg, ok := Agents[a]
 			if !ok {
@@ -246,15 +315,28 @@ func RemoveInstalledSkills(skills []string, opts RemoveInstalledOptions) []Remov
 					}
 				}
 			}
+			seenDir := map[string]bool{}
 			for _, d := range dirs {
 				p := filepath.Join(d, sanitized)
-				if p == canonicalPath {
+				if p == canonicalPath || seenDir[p] {
 					continue
 				}
-				if _, err := os.Lstat(p); err == nil {
-					if err := lcRemoveSkillDir(d, sanitized); err != nil && opts.OnWarn != nil {
-						opts.OnWarn(fmt.Sprintf("Could not remove skill from %s: %v", cfg.DisplayName, err))
+				seenDir[p] = true
+				st, err := os.Lstat(p)
+				if err != nil {
+					continue
+				}
+				if !isGlobal && st.Mode()&os.ModeSymlink == 0 && isUnmanagedProjectDir(p, cwd, lockEntry) {
+					msg := FormatError(ErrRemoveUnmanagedDirKept(p))
+					if opts.OnWarn != nil {
+						opts.OnWarn(msg)
+					} else {
+						fmt.Fprintf(os.Stderr, "%sWarning: %s%s\n", ansiYellow, msg, ansiReset)
 					}
+					continue
+				}
+				if err := lcRemoveSkillDir(d, sanitized); err != nil && opts.OnWarn != nil {
+					opts.OnWarn(fmt.Sprintf("Could not remove skill from %s: %v", cfg.DisplayName, err))
 				}
 			}
 		}
@@ -374,19 +456,19 @@ func removeSelection(skillNames []string, opts RemoveOptions, cwd string, onWarn
 	}
 
 	var requested []string
-	switch {
-	case opts.All && opts.Global:
-		// Global --all only removes skills recorded in .skill-lock.json (#609).
+	if opts.All {
+		// --all only removes skills recorded in the lock file for the active scope (#609, #2715).
 		requested = lockKeys
-	case opts.All:
-		requested = append(append([]string{}, installed...), lockKeys...)
-	default:
+		if untracked := FindUntrackedSkills(installed, lockKeys); len(untracked) > 0 && onWarn != nil {
+			onWarn(FormatError(ErrRemoveUntrackedSkipped(untracked)))
+		}
+	} else {
 		requested = skillNames
 	}
 	if opts.All || len(skillNames) > 0 {
 		selected = ResolveSkillsToRemove(requested, installed, lockKeys, sourceByKey)
 	}
-	if len(installed) == 0 && len(selected) == 0 && (opts.All || len(skillNames) > 0) {
+	if (opts.All && len(selected) == 0) || (len(installed) == 0 && len(selected) == 0 && len(skillNames) > 0) {
 		return nil, installed, lockKeys, &removeNothing{noSkillsMsg(opts)}
 	}
 	if !opts.All && len(skillNames) > 0 && len(selected) == 0 {
@@ -396,14 +478,20 @@ func removeSelection(skillNames []string, opts RemoveOptions, cwd string, onWarn
 }
 
 func noSkillsMsg(opts RemoveOptions) string {
-	if opts.All && opts.Global {
-		return "No globally managed skills found to remove."
+	if opts.All {
+		if opts.Global {
+			return "No globally managed skills found to remove."
+		}
+		return "No lock-tracked skills found to remove."
 	}
 	return "No skills found to remove."
 }
 
 // validateRemoveArgs applies the wildcard, --all and --agent guards.
 func validateRemoveArgs(skillNames []string, opts *RemoveOptions) ([]string, error) {
+	if len(opts.Errors) > 0 {
+		return nil, opts.Errors[0]
+	}
 	var names []string
 	for _, n := range skillNames {
 		if n == "*" {
@@ -482,6 +570,7 @@ func RunRemove(skillNames []string, opts RemoveOptions, cwd string) int {
 }
 
 func runRemove(skillNames []string, opts RemoveOptions, cwd string, stdout, stderr io.Writer, stdin io.Reader) int {
+	RefreshColors()
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}

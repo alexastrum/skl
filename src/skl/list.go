@@ -11,43 +11,41 @@ import (
 	"strings"
 )
 
-// ANSI styles shared by the lifecycle commands (list, remove, find, update, install, sync).
-const (
-	ansiReset  = "\x1b[0m"
-	ansiBold   = "\x1b[1m"
-	ansiDim    = "\x1b[38;5;102m"
-	ansiText   = "\x1b[38;5;145m"
-	ansiCyan   = "\x1b[36m"
-	ansiYellow = "\x1b[33m"
-	ansiGreen  = "\x1b[32m"
-	ansiRed    = "\x1b[31m"
-)
-
 var (
 	lcWhitespaceRun = regexp.MustCompile(`\s+`)
 	lcLegacyUnsafe  = regexp.MustCompile(`[/\\:\x00]`)
 )
 
-// ParseListOptions parses `skl list` flags. `-a/--agent` consumes every following
-// non-flag token (comma-separated values are split too).
+var listOptionSpec = map[string]CLIOptionSpec{
+	"global":  {Type: CLIOptionBoolean, Short: "g"},
+	"project": {Type: CLIOptionBoolean, Short: "p"},
+	"json":    {Type: CLIOptionBoolean},
+	"agent":   {Type: CLIOptionList, Short: "a", Value: "an agent name"},
+}
+
+// ParseListOptions parses `skl list` flags (#2712). `-a/--agent` consumes every following
+// non-flag token (or inline =values and comma-separated lists).
 func ParseListOptions(args []string) ListOptions {
+	opts, _ := parseListOptionsWithErrors(args)
+	return opts
+}
+
+func parseListOptionsWithErrors(args []string) (ListOptions, []*DiagnosticError) {
 	var opts ListOptions
-	for i := 0; i < len(args); i++ {
-		switch arg := args[i]; arg {
-		case "-g", "--global":
+	cli := ParseCLIArgs(args, listOptionSpec)
+	for _, flag := range cli.FlagOrder {
+		switch flag {
+		case "global":
 			opts.Global = true
-		case "-p", "--project":
+		case "project":
 			opts.Global = false
-		case "--json":
-			opts.JSON = true
-		case "-a", "--agent":
-			for i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				i++
-				opts.AgentFilter = append(opts.AgentFilter, splitAgentList(args[i])...)
-			}
 		}
 	}
-	return opts
+	opts.JSON = cli.Bools["json"]
+	for _, tok := range cli.Strings["agent"] {
+		opts.AgentFilter = append(opts.AgentFilter, splitAgentList(tok)...)
+	}
+	return opts, cli.Errors
 }
 
 // splitAgentList splits a comma-separated agent token into trimmed AgentTypes.
@@ -376,10 +374,11 @@ func formatList(items []string, maxShow int) string {
 
 // listLockEntry is the scope-independent view of a lock entry used by list.
 type listLockEntry struct {
-	Source     string
-	SourceURL  string
-	SourceType string
-	PluginName string
+	Source       string
+	SourceURL    string
+	SourceType   string
+	PluginName   string
+	ComputedHash string
 }
 
 // ListJSONEntry is one element of `skl list --json` output.
@@ -442,11 +441,18 @@ func RunList(args []string, cwd string) int {
 }
 
 func runList(args []string, cwd string, stdout, stderr io.Writer) int {
+	RefreshColors(args...)
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	opts := ParseListOptions(args)
+	opts, parseErrs := parseListOptionsWithErrors(args)
 	opts.Cwd = cwd
+	if len(parseErrs) > 0 {
+		for _, e := range parseErrs {
+			fmt.Fprintln(stderr, FormatError(e))
+		}
+		return 1
+	}
 
 	if len(opts.AgentFilter) > 0 {
 		if invalid := invalidAgentNames(opts.AgentFilter); len(invalid) > 0 {
@@ -466,7 +472,7 @@ func runList(args []string, cwd string, stdout, stderr io.Writer) int {
 	if opts.Global {
 		gl, _ := ReadSkillLock()
 		for k, e := range gl.Skills {
-			locked[k] = listLockEntry{e.Source, e.SourceUrl, e.SourceType, e.PluginName}
+			locked[k] = listLockEntry{Source: e.Source, SourceURL: e.SourceUrl, SourceType: e.SourceType, PluginName: e.PluginName}
 			lockKeys = append(lockKeys, k)
 		}
 	} else {
@@ -480,7 +486,7 @@ func runList(args []string, cwd string, stdout, stderr io.Writer) int {
 		}
 		for k, e := range ll.Skills {
 			// Project lock entries carry no plugin name (upstream local-lock schema).
-			locked[k] = listLockEntry{Source: e.Source, SourceURL: e.SourceUrl, SourceType: e.SourceType}
+			locked[k] = listLockEntry{Source: e.Source, SourceURL: e.SourceUrl, SourceType: e.SourceType, ComputedHash: e.ComputedHash}
 			lockKeys = append(lockKeys, k)
 		}
 	}
@@ -510,6 +516,31 @@ func runList(args []string, cwd string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	modifiedNames := map[string]bool{}
+	if !opts.Global {
+		for _, s := range installed {
+			e, ok := getLock(s.Name)
+			if !ok {
+				continue
+			}
+			state := GetLockedSkillState(s.Name, LocalSkillLockEntry{
+				Source: e.Source, SourceType: e.SourceType, ComputedHash: e.ComputedHash,
+			}, cwd, s.CanonicalPath)
+			if state == "modified" {
+				modifiedNames[s.Name] = true
+			}
+		}
+	}
+	statusOf := func(s InstalledSkill) string {
+		if _, ok := getLock(s.Name); !ok {
+			return "untracked"
+		}
+		if modifiedNames[s.Name] {
+			return "modified"
+		}
+		return "tracked"
+	}
+
 	scopeName := "project"
 	scopeLabel := "Project"
 	if opts.Global {
@@ -525,13 +556,12 @@ func runList(args []string, cwd string, stdout, stderr io.Writer) int {
 				Path:   strPtr(s.CanonicalPath),
 				Scope:  s.Scope,
 				Agents: agentDisplayNames(s.Agents),
-				Status: "untracked",
+				Status: statusOf(s),
 			}
 			if ok {
 				entry.Source = strPtr(e.Source)
 				entry.SourceURL = optStr(e.SourceURL)
 				entry.SourceType = strPtr(e.SourceType)
-				entry.Status = "tracked"
 			}
 			out = append(out, entry)
 		}
@@ -586,9 +616,13 @@ func runList(args []string, cwd string, stdout, stderr io.Writer) int {
 			if e, ok := getLock(s.Name); ok && e.Source != "" {
 				sourceLabel = SanitizeMetadata(e.Source)
 			}
+			stateLabel := ""
+			if statusOf(s) == "modified" {
+				stateLabel = fmt.Sprintf("  %smodified%s %s(differs from the lock)%s", ansiYellow, ansiReset, ansiDim, ansiReset)
+			}
 			fmt.Fprintf(stdout, "%s%s%s%s %s%s%s\n", prefix, ansiCyan, padRight(SanitizeMetadata(s.Name), maxName), ansiReset,
 				ansiDim, padRight(ShortenPath(s.CanonicalPath, cwd), maxPath), ansiReset)
-			fmt.Fprintf(stdout, "%s  %sAgents:%s %s  %sSource:%s %s\n", prefix, ansiDim, ansiReset, agentInfo, ansiDim, ansiReset, sourceLabel)
+			fmt.Fprintf(stdout, "%s  %sAgents:%s %s  %sSource:%s %s%s\n", prefix, ansiDim, ansiReset, agentInfo, ansiDim, ansiReset, sourceLabel, stateLabel)
 		}
 		fmt.Fprintln(stdout)
 	}

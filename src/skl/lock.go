@@ -109,10 +109,11 @@ type SkillTreeFile struct {
 }
 
 const (
-	GlobalLockFile = ".skill-lock.json"
-	LocalLockFile  = "skills-lock.json"
-	GlobalLockVer  = 3
-	LocalLockVer   = 1
+	GlobalLockFile     = ".skill-lock.json"
+	LocalLockFile      = "skills-lock.json"
+	GlobalLockVer      = 3
+	LocalLockVer       = 2
+	legacyLocalLockVer = 1
 )
 
 // marshalPrettyJSON serializes v the way JavaScript's JSON.stringify(v, null, 2) does: no
@@ -467,10 +468,21 @@ func SaveSelectedAgents(agents []string) error {
 	return WriteSkillLock(lock)
 }
 
+// ReadLocalLockOptions controls optional migration behavior when reading skills-lock.json.
+type ReadLocalLockOptions struct {
+	PersistMigration bool
+}
+
 // ReadLocalLock reads the local project lock file (skills-lock.json).
 // Returns an empty lock when the file does not exist; returns an error wrapping
 // ErrInvalidLocalLock when the file exists on disk but is malformed or unsupported.
 func ReadLocalLock(cwd string) (LocalSkillLockFile, error) {
+	return ReadLocalLockWithOptions(cwd, ReadLocalLockOptions{})
+}
+
+// ReadLocalLockWithOptions reads skills-lock.json and optionally persists a v1 -> v2
+// migration back to disk (#2685).
+func ReadLocalLockWithOptions(cwd string, opts ReadLocalLockOptions) (LocalSkillLockFile, error) {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
@@ -511,11 +523,21 @@ func ReadLocalLock(cwd string) (LocalSkillLockFile, error) {
 		return LocalSkillLockFile{}, fmt.Errorf("%w: Invalid %s: %v", ErrInvalidLocalLock, path, err)
 	}
 
-	if lock.Version != LocalLockVer {
+	if lock.Version != LocalLockVer && lock.Version != legacyLocalLockVer {
 		return LocalSkillLockFile{}, fmt.Errorf("%w: Invalid %s: unsupported lock version %d (expected %d)", ErrInvalidLocalLock, path, lock.Version, LocalLockVer)
 	}
 	if lock.Skills == nil {
 		lock.Skills = make(map[string]LocalSkillLockEntry)
+	}
+
+	wasLegacy := lock.Version == legacyLocalLockVer
+	if wasLegacy {
+		for name, entry := range lock.Skills {
+			installedDir := filepath.Join(cwd, ".agents", "skills", SanitizeName(name))
+			entry.ComputedHash = migrateComputedHash(installedDir, entry.ComputedHash)
+			lock.Skills[name] = entry
+		}
+		lock.Version = LocalLockVer
 	}
 
 	for name, entry := range lock.Skills {
@@ -525,7 +547,51 @@ func ReadLocalLock(cwd string) (LocalSkillLockFile, error) {
 		}
 	}
 
+	if wasLegacy && opts.PersistMigration {
+		_ = WriteLocalLock(lock, cwd)
+	}
+
 	return lock, nil
+}
+
+func migrateComputedHash(installedDir, v1Hash string) string {
+	if v1Hash == "" {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(installedDir, "SKILL.md")); err != nil {
+		return ""
+	}
+	legacy, err := ComputeLegacySkillFolderHash(installedDir)
+	if err != nil || legacy != v1Hash {
+		return ""
+	}
+	v2, err := ComputeSkillFolderHash(installedDir)
+	if err != nil {
+		return ""
+	}
+	return v2
+}
+
+// GetLockedSkillState compares an installed skill directory against its local lock entry (#2685).
+// Returns "missing", "tracked", or "modified".
+func GetLockedSkillState(skillName string, entry LocalSkillLockEntry, cwd, dir string) string {
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	if dir == "" {
+		dir = filepath.Join(cwd, ".agents", "skills", SanitizeName(skillName))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "SKILL.md")); err != nil {
+		return "missing"
+	}
+	if entry.ComputedHash == "" {
+		return "modified"
+	}
+	h, err := ComputeSkillFolderHash(dir)
+	if err == nil && h == entry.ComputedHash {
+		return "tracked"
+	}
+	return "modified"
 }
 
 func createEmptyLocalLock() LocalSkillLockFile {
@@ -632,6 +698,9 @@ func LockChangeReason(lock LocalSkillLockFile, skillName string, entry LocalSkil
 	if !ok {
 		return fmt.Sprintf("%s is not in skills-lock.json", skillName)
 	}
+	if locked.ComputedHash == "" {
+		return fmt.Sprintf("%s has no content hash in skills-lock.json (migrated from version 1, and the installed skill was missing or did not match)", skillName)
+	}
 	if locked.ComputedHash != entry.ComputedHash {
 		return fmt.Sprintf("%s has changed since skills-lock.json was written", skillName)
 	}
@@ -660,10 +729,188 @@ func FrozenLockfileError(changes []string) error {
 	return errors.New(strings.Join(lines, "\n"))
 }
 
-// ComputeSkillFolderHash computes a SHA-256 hash from all regular files in a skill directory,
-// matching computeSkillFolderHash in upstream src/local-lock.ts: files are ordered with
-// relativePath.localeCompare (ICU collation, see newLocaleCollator), not byte order.
+// HashedFile is a relative slash path and its raw bytes for HashSkillFiles (#2685).
+type HashedFile struct {
+	Path    string
+	Content []byte
+}
+
+var (
+	skillHashExcludeFiles = map[string]bool{
+		"metadata.json": true,
+	}
+	skillHashExcludeDirs = map[string]bool{
+		".git":           true,
+		"__pycache__":    true,
+		"__pypackages__": true,
+	}
+)
+
+// IsExcluded reports whether a directory entry is excluded from installed skills and hashes.
+func IsExcluded(name string, isDir bool) bool {
+	if isDir {
+		return skillHashExcludeDirs[name]
+	}
+	return skillHashExcludeFiles[name] || strings.HasPrefix(name, "_")
+}
+
+// IsExcludedPath reports whether a slash-separated or native relative path inside a skill
+// should be excluded from installation and hashing.
+func IsExcludedPath(relPath string) bool {
+	parts := strings.FieldsFunc(filepath.ToSlash(relPath), func(r rune) bool { return r == '/' })
+	if len(parts) == 0 {
+		return false
+	}
+	for i := 0; i < len(parts)-1; i++ {
+		if IsExcluded(parts[i], true) {
+			return true
+		}
+	}
+	return IsExcluded(parts[len(parts)-1], false)
+}
+
+func normalizeSkillLineEndings(content []byte) []byte {
+	if bytes.IndexByte(content, 0) >= 0 {
+		return content
+	}
+	if !bytes.Contains(content, []byte("\r\n")) {
+		return content
+	}
+	return bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
+}
+
+// HashSkillFiles computes the portable v2 SHA-256 content digest for a set of skill files (#2685):
+//   - Paths use forward slashes and are sorted by UTF-8 byte order.
+//   - Text files (no NUL byte) normalize CRLF to LF.
+//   - Each file is framed as "<path>\0<byteLength>\0<content>".
+func HashSkillFiles(files []HashedFile) string {
+	type normFile struct {
+		path    string
+		content []byte
+	}
+	entries := make([]normFile, len(files))
+	for i, f := range files {
+		entries[i] = normFile{
+			path:    strings.ReplaceAll(f.Path, `\`, "/"),
+			content: normalizeSkillLineEndings(f.Content),
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].path < entries[j].path
+	})
+	h := sha256.New()
+	for _, e := range entries {
+		h.Write([]byte(e.path))
+		h.Write([]byte{0})
+		h.Write([]byte(strconv.Itoa(len(e.content))))
+		h.Write([]byte{0})
+		h.Write(e.content)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func isWithinSkillRoot(root, candidate string) bool {
+	rel, err := filepath.Rel(root, candidate)
+	if err != nil {
+		return false
+	}
+	if rel == "" || rel == "." {
+		return true
+	}
+	if filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// ComputeSkillFolderHash computes the portable v2 SHA-256 hash of a skill directory (#2685),
+// matching computeSkillFolderHash in upstream src/skill-hash.ts.
 func ComputeSkillFolderHash(skillDir string) (string, error) {
+	root, err := filepath.EvalSymlinks(skillDir)
+	if err != nil {
+		return "", err
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	var files []HashedFile
+	var collect func(dir, prefix string, ancestors map[string]bool) error
+	collect = func(dir, prefix string, ancestors map[string]bool) error {
+		realDir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return nil
+		}
+		if abs, err := filepath.Abs(realDir); err == nil {
+			realDir = abs
+		}
+		if ancestors[realDir] {
+			return nil
+		}
+		branch := make(map[string]bool, len(ancestors)+1)
+		for k, v := range ancestors {
+			branch[k] = v
+		}
+		branch[realDir] = true
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if IsExcluded(name, entry.IsDir()) {
+				continue
+			}
+			fullPath := filepath.Join(dir, name)
+			relPath := prefix + name
+			isDir := entry.IsDir()
+
+			if entry.Type()&os.ModeSymlink != 0 {
+				target, err := filepath.EvalSymlinks(fullPath)
+				if err != nil {
+					continue
+				}
+				if abs, err := filepath.Abs(target); err == nil {
+					target = abs
+				}
+				if !isWithinSkillRoot(root, target) {
+					continue
+				}
+				st, err := os.Stat(target)
+				if err != nil {
+					continue
+				}
+				isDir = st.IsDir()
+				if isDir && IsExcluded(name, true) {
+					continue
+				}
+			} else if !isDir && !entry.Type().IsRegular() {
+				continue
+			}
+
+			if isDir {
+				if err := collect(fullPath, relPath+"/", branch); err != nil {
+					return err
+				}
+			} else {
+				content, err := os.ReadFile(fullPath)
+				if err != nil {
+					return err
+				}
+				files = append(files, HashedFile{Path: relPath, Content: content})
+			}
+		}
+		return nil
+	}
+	if err := collect(root, "", map[string]bool{}); err != nil {
+		return "", err
+	}
+	return HashSkillFiles(files), nil
+}
+
+// ComputeLegacySkillFolderHash computes the legacy lock v1 SHA-256 hash used only to verify
+// and migrate version 1 skills-lock.json files (#2685).
+func ComputeLegacySkillFolderHash(skillDir string) (string, error) {
 	var files []struct {
 		relPath string
 		content []byte

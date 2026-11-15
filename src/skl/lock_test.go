@@ -208,10 +208,10 @@ func TestInvalidLocalLockAndWriteFailures(t *testing.T) {
 	}
 
 	// Unsupported lock version
-	v2Dir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(v2Dir, "skills-lock.json"), []byte(`{"version":2,"skills":{}}`), 0644)
-	if _, err := ReadLocalLock(v2Dir); !errors.Is(err, ErrInvalidLocalLock) {
-		t.Errorf("expected ErrInvalidLocalLock on version 2, got %v", err)
+	v3Dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(v3Dir, "skills-lock.json"), []byte(`{"version":3,"skills":{}}`), 0644)
+	if _, err := ReadLocalLock(v3Dir); !errors.Is(err, ErrInvalidLocalLock) {
+		t.Errorf("expected ErrInvalidLocalLock on version 3, got %v", err)
 	}
 
 	// Write failure (#2606) when lock file is read-only (skip if running as root)
@@ -576,12 +576,12 @@ func TestComputeSkillFolderHashUsesLocaleOrder(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			got, err := ComputeSkillFolderHash(dir)
+			got, err := ComputeLegacySkillFolderHash(dir)
 			if err != nil {
-				t.Fatalf("ComputeSkillFolderHash: %v", err)
+				t.Fatalf("ComputeLegacySkillFolderHash: %v", err)
 			}
 			if got != tt.want {
-				t.Errorf("ComputeSkillFolderHash = %s, want %s", got, tt.want)
+				t.Errorf("ComputeLegacySkillFolderHash = %s, want %s", got, tt.want)
 			}
 		})
 	}

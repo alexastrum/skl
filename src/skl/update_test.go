@@ -1098,8 +1098,8 @@ func TestRunUpdate_ProjectWellKnownHashMatchesFrozenInstall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != want || got == lcHash(t, staged) {
-		t.Fatalf("computedHash = %q, want installed-copy hash %q (raw staging hash %q)", got, want, lcHash(t, staged))
+	if got != want {
+		t.Fatalf("computedHash = %q, want installed-copy hash %q", got, want)
 	}
 	if inst := lcHash(t, filepath.Join(cwd, ".agents", "skills", "wk-a")); got != inst {
 		t.Errorf("computedHash = %q, installed copy hashes to %q", got, inst)

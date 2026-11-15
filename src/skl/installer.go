@@ -113,8 +113,13 @@ func isPathSafe(basePath, targetPath string) bool {
 	return strings.HasPrefix(target, strings.TrimSuffix(base, string(filepath.Separator))+string(filepath.Separator))
 }
 
-func pathsOverlap(a, b string) bool {
+// PathsOverlap reports whether path a is equal to, an ancestor of, or a descendant of path b.
+func PathsOverlap(a, b string) bool {
 	return isPathSafe(a, b) || isPathSafe(b, a)
+}
+
+func pathsOverlap(a, b string) bool {
+	return PathsOverlap(a, b)
 }
 
 func shouldSkipProjectAgentSymlink(agentType AgentType, isGlobal bool, cwd string, createMissingAgentRoot bool) bool {
@@ -178,6 +183,11 @@ func GetInstallPath(skillName string, agentType AgentType, global bool, cwd stri
 	return filepath.Join(GetAgentBaseDir(agentType, global, cwd, ""), SanitizeName(skillName))
 }
 
+// GetTargetInstallPath returns the install path for an InstallTarget (including Eve subagents).
+func GetTargetInstallPath(skillName string, target InstallTarget, global bool, cwd string) string {
+	return filepath.Join(GetAgentBaseDir(target.Agent, global, cwd, target.EveSubagent), SanitizeName(skillName))
+}
+
 // GetCanonicalPath returns the canonical .agents/skills/<skill> path.
 func GetCanonicalPath(skillName string, global bool, cwd string) string {
 	return filepath.Join(GetCanonicalSkillsDir(global, cwd), SanitizeName(skillName))
@@ -216,7 +226,41 @@ func resolveSymlinkTarget(linkPath, linkTarget string) string {
 	return installAbsClean(filepath.Join(filepath.Dir(linkPath), linkTarget))
 }
 
+// FindCategoryDirSkills checks whether targetPath is a category directory: a real
+// directory without its own SKILL.md whose immediate subdirectories contain SKILL.md (#2723).
+// Returns the nested skill subdirectory names, or nil if targetPath is safe to replace.
+func FindCategoryDirSkills(targetPath string) []string {
+	st, err := os.Lstat(targetPath)
+	if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(targetPath, "SKILL.md")); err == nil {
+		return nil
+	}
+	entries, err := os.ReadDir(targetPath)
+	if err != nil {
+		return nil
+	}
+	var skills []string
+	for _, entry := range entries {
+		if _, err := os.Stat(filepath.Join(targetPath, entry.Name(), "SKILL.md")); err == nil {
+			skills = append(skills, entry.Name())
+		}
+	}
+	return skills
+}
+
+func assertNotCategoryDir(targetPath string) error {
+	if skills := FindCategoryDirSkills(targetPath); len(skills) > 0 {
+		return ErrCategoryDirConflict(targetPath, skills)
+	}
+	return nil
+}
+
 func cleanAndCreateDirectory(path string) error {
+	if err := assertNotCategoryDir(path); err != nil {
+		return err
+	}
 	_ = os.RemoveAll(path)
 	return os.MkdirAll(path, 0o755)
 }
@@ -242,33 +286,37 @@ func installEvalOr(p string) string {
 // createSymlink links linkPath to target using a relative link (a directory junction
 // with an absolute target on Windows when symlinks are unavailable). It returns false
 // when the caller must fall back to copying.
-func createSymlink(target, linkPath string) bool {
+func createSymlink(target, linkPath string) (bool, error) {
 	resolvedTarget := installAbsClean(target)
 	resolvedLinkPath := installAbsClean(linkPath)
 
 	if installEvalOr(resolvedTarget) == installEvalOr(resolvedLinkPath) {
-		return true
+		return true, nil
 	}
 	if resolveParentSymlinks(target) == resolveParentSymlinks(linkPath) {
-		return true
+		return true, nil
+	}
+
+	if err := assertNotCategoryDir(linkPath); err != nil {
+		return false, err
 	}
 
 	if info, err := os.Lstat(linkPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
 			if existing, err := os.Readlink(linkPath); err == nil && resolveSymlinkTarget(linkPath, existing) == resolvedTarget {
-				return true
+				return true, nil
 			}
 			if err := os.Remove(linkPath); err != nil {
-				return false
+				return false, nil
 			}
 		} else if err := os.RemoveAll(linkPath); err != nil {
-			return false
+			return false, nil
 		}
 	}
 
 	linkDir := filepath.Dir(linkPath)
 	if err := os.MkdirAll(linkDir, 0o755); err != nil {
-		return false
+		return false, nil
 	}
 	realLinkDir := resolveParentSymlinks(linkDir)
 	if real, err := filepath.EvalSymlinks(linkDir); err == nil {
@@ -283,13 +331,13 @@ func createSymlink(target, linkPath string) bool {
 
 	if runtime.GOOS == "windows" {
 		if err := os.Symlink(resolvedTarget, linkPath); err == nil {
-			return true
+			return true, nil
 		}
 		// No Developer Mode: fall back to a directory junction, created through the
 		// Win32 API (never through cmd.exe, which would interpret path metacharacters).
-		return createJunction(linkPath, resolvedTarget) == nil
+		return createJunction(linkPath, resolvedTarget) == nil, nil
 	}
-	return os.Symlink(rel, linkPath) == nil
+	return os.Symlink(rel, linkPath) == nil, nil
 }
 
 func installWarnf(format string, args ...interface{}) {
@@ -562,9 +610,25 @@ func InstallSkillForAgent(skill Skill, agentType AgentType, opts InstallOptions)
 	if !sourceIsCanonical && pathsOverlap(skill.Path, canonicalDir) {
 		return InstallResult{Success: true, Path: canonicalDir, CanonicalPath: canonicalDir, Mode: mode, Skipped: true}
 	}
+	linksAgentDir := !(opts.Global && ReadsCanonicalGlobally(agentType)) &&
+		!shouldSkipProjectAgentSymlink(agentType, opts.Global, cwd, opts.CreateMissingAgentRoot)
+	if !sourceIsCanonical {
+		if err := assertNotCategoryDir(canonicalDir); err != nil {
+			return failResult(agentDir, mode, err)
+		}
+	}
+	if linksAgentDir {
+		if err := assertNotCategoryDir(agentDir); err != nil {
+			return failResult(agentDir, mode, err)
+		}
+	}
 	if !sourceIsCanonical {
 		if mode == InstallModeLink {
-			if !createSymlink(skill.Path, canonicalDir) {
+			linked, err := createSymlink(skill.Path, canonicalDir)
+			if err != nil {
+				return failResult(agentDir, mode, err)
+			}
+			if !linked {
 				if err := cleanAndCreateDirectory(canonicalDir); err != nil {
 					return failResult(agentDir, mode, err)
 				}
@@ -603,7 +667,11 @@ func linkCanonicalToAgent(canonicalDir, agentDir string, agentType AgentType, mo
 	if installAbsClean(canonicalDir) == installAbsClean(agentDir) {
 		return InstallResult{Success: true, Path: agentDir, CanonicalPath: canonicalDir, Mode: mode}
 	}
-	if !createSymlink(canonicalDir, agentDir) {
+	linked, err := createSymlink(canonicalDir, agentDir)
+	if err != nil {
+		return failResult(agentDir, mode, err)
+	}
+	if !linked {
 		if opts.Verbose {
 			fmt.Printf("⚠️  Symlink failed, falling back to copy: %s\n", agentDir)
 		}
@@ -721,6 +789,16 @@ func installFilesForAgent(installName string, files []InstallFile, agentType Age
 		return InstallResult{Success: true, Path: agentDir, Mode: InstallModeCopy}
 	}
 
+	linksAgentDir := !(opts.Global && ReadsCanonicalGlobally(agentType)) &&
+		!(kind == filesKindBlob && shouldSkipProjectAgentSymlink(agentType, opts.Global, cwd, opts.CreateMissingAgentRoot))
+	if err := assertNotCategoryDir(canonicalDir); err != nil {
+		return failResult(agentDir, mode, err)
+	}
+	if linksAgentDir {
+		if err := assertNotCategoryDir(agentDir); err != nil {
+			return failResult(agentDir, mode, err)
+		}
+	}
 	if err := cleanAndCreateDirectory(canonicalDir); err != nil {
 		return failResult(agentDir, mode, err)
 	}

@@ -526,10 +526,11 @@ func addFakeLocalFetch(t *testing.T, root string) *FetchedSource {
 // addStub installs a fetch stub and a "not running in an agent" detector for one test.
 func addStub(t *testing.T, fetch func(req SourceRequest) (*FetchedSource, error)) {
 	t.Helper()
-	origFetch, origDetect := fetchSourceFn, addDetectAgent
-	t.Cleanup(func() { fetchSourceFn, addDetectAgent = origFetch, origDetect })
+	origFetch, origDetect, origLookup := fetchSourceFn, addDetectAgent, lookupGitHubRepoFn
+	t.Cleanup(func() { fetchSourceFn, addDetectAgent, lookupGitHubRepoFn = origFetch, origDetect, origLookup })
 	fetchSourceFn = fetch
 	addDetectAgent = func() AgentDetectionResult { return AgentDetectionResult{} }
+	lookupGitHubRepoFn = func(ParsedSource) *GitHubRepoMetadata { return nil }
 }
 
 func addFetchMustNotRun(t *testing.T) func(SourceRequest) (*FetchedSource, error) {

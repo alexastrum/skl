@@ -116,111 +116,103 @@ func addLooksLikeSource(tok string) bool {
 	return strings.ContainsAny(tok, `/\:`) || strings.HasPrefix(tok, ".") || strings.HasPrefix(tok, "~")
 }
 
-// ParseAddCLIOptions parses `skl add` arguments with upstream semantics: -a/--agent,
-// -s/--skill and --subagent consume every following non-flag token (values may also be
-// comma-separated). For compatibility with `skl add -a <agent> <source>`, when no
+var addOptionSpec = map[string]CLIOptionSpec{
+	"global":     {Type: CLIOptionBoolean, Short: "g"},
+	"project":    {Type: CLIOptionBoolean, Short: "p"},
+	"yes":        {Type: CLIOptionBoolean, Short: "y"},
+	"list":       {Type: CLIOptionBoolean, Short: "l"},
+	"all":        {Type: CLIOptionBoolean},
+	"copy":       {Type: CLIOptionBoolean},
+	"full-depth": {Type: CLIOptionBoolean},
+	"json":       {Type: CLIOptionBoolean},
+	"verbose":    {Type: CLIOptionBoolean, Short: "v"},
+	"agent":      {Type: CLIOptionList, Short: "a", Value: "an agent name"},
+	"skill":      {Type: CLIOptionList, Short: "s", Value: "a skill name"},
+	"subagent":   {Type: CLIOptionList, Value: "a subagent name"},
+	"metadata":   {Type: CLIOptionString, Value: "a JSON value"},
+}
+
+// ParseAddCLIOptions parses `skl add` arguments with upstream semantics (#2712): -a/--agent,
+// -s/--skill and --subagent consume every following non-flag token (or take inline =values
+// and comma-separated lists). For compatibility with `skl add -a <agent> <source>`, when no
 // positional source was given and the last greedily consumed token is clearly a source
 // (an unknown agent name, or a path/URL-like skill token), it is used as the source.
 func ParseAddCLIOptions(args []string) ParsedAddCLI {
 	res := ParsedAddCLI{ExplicitAgentSet: map[AgentType]bool{}}
 	opts := &res.Options
-	type lastToken struct {
-		flag  string
-		value string
-		count int // values consumed by this flag occurrence
+	cli := ParseCLIArgs(args, addOptionSpec)
+	for _, e := range cli.Errors {
+		res.Errors = append(res.Errors, e)
 	}
-	var last *lastToken
+	res.Sources = append(res.Sources, cli.Positionals...)
 
-	consume := func(i int, flag string, add func(string)) int {
-		j := i + 1
-		n := 0
-		for j < len(args) && args[j] != "" && !strings.HasPrefix(args[j], "-") {
-			for _, v := range addSplitCommas(args[j]) {
-				add(v)
-				n++
-				last = &lastToken{flag: flag, value: v, count: n}
-			}
-			j++
-		}
-		return j - 1
-	}
-
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch arg {
-		case "-g", "--global":
+	for _, flag := range cli.FlagOrder {
+		switch flag {
+		case "global":
 			opts.Global = true
 			res.ScopeExplicit = true
-		case "-p", "--project":
+		case "project":
 			opts.Global = false
 			res.ScopeExplicit = true
-		case "-y", "--yes":
-			opts.Yes = true
-		case "-l", "--list":
-			opts.List = true
-		case "--all":
-			opts.All = true
-		case "--copy":
-			opts.Copy = true
-		case "--full-depth":
-			opts.FullDepth = true
-		case "--json":
-			opts.JSON = true
-		case "-v", "--verbose":
-			opts.Verbose = true
-		case "-a", "--agent":
-			res.AgentFlagPassed = true
-			i = consume(i, "agent", func(v string) { opts.Agent = append(opts.Agent, AgentType(v)) })
-		case "-s", "--skill":
-			i = consume(i, "skill", func(v string) { opts.Skill = append(opts.Skill, v) })
-		case "--subagent":
-			i = consume(i, "subagent", func(v string) { opts.Subagent = append(opts.Subagent, v) })
-		case "--metadata":
-			if i+1 >= len(args) {
-				res.Errors = append(res.Errors, ErrOptionRequiresValue("--metadata", "a JSON value"))
-			} else {
-				i++
-				if json.Valid([]byte(args[i])) {
-					opts.Metadata = args[i]
-				} else {
-					res.Errors = append(res.Errors, ErrInvalidOptionValue("--metadata", "valid JSON"))
-				}
-			}
-		default:
-			if arg != "" && !strings.HasPrefix(arg, "-") {
-				res.Sources = append(res.Sources, arg)
+		}
+	}
+	opts.Yes = cli.Bools["yes"]
+	opts.List = cli.Bools["list"]
+	opts.All = cli.Bools["all"]
+	opts.Copy = cli.Bools["copy"]
+	opts.FullDepth = cli.Bools["full-depth"]
+	opts.JSON = cli.Bools["json"]
+	opts.Verbose = cli.Bools["verbose"]
+
+	if rawAgents, ok := cli.Strings["agent"]; ok {
+		res.AgentFlagPassed = true
+		for _, tok := range rawAgents {
+			for _, v := range addSplitCommas(tok) {
+				opts.Agent = append(opts.Agent, AgentType(v))
 			}
 		}
 	}
-
-	// Only reclaim when the flag took more than one value, so `install -a bogus` still
-	// reports an invalid agent instead of treating "bogus" as a source.
-	if len(res.Sources) == 0 && last != nil && last.count >= 2 {
-		reclaim := false
-		switch last.flag {
-		case "agent":
-			_, known := Agents[AgentType(last.value)]
-			reclaim = !known && last.value != "*"
-		case "skill", "subagent":
-			reclaim = addLooksLikeSource(last.value)
+	for _, tok := range cli.Strings["skill"] {
+		opts.Skill = append(opts.Skill, addSplitCommas(tok)...)
+	}
+	for _, tok := range cli.Strings["subagent"] {
+		opts.Subagent = append(opts.Subagent, addSplitCommas(tok)...)
+	}
+	for _, m := range cli.Strings["metadata"] {
+		if json.Valid([]byte(m)) {
+			opts.Metadata = m
+		} else {
+			res.Errors = append(res.Errors, ErrInvalidOptionValue("--metadata", "valid JSON"))
 		}
-		if reclaim {
-			res.Sources = append(res.Sources, last.value)
-			switch last.flag {
-			case "agent":
-				opts.Agent = opts.Agent[:len(opts.Agent)-1]
-				if len(opts.Agent) == 0 {
-					opts.Agent = nil
+	}
+
+	// Only reclaim when the final flag was a space-separated list that took more than one
+	// value, so `install -a bogus` still reports an invalid agent instead of treating
+	// "bogus" as a source.
+	if len(res.Sources) == 0 && cli.TrailingListOption != "" {
+		switch cli.TrailingListOption {
+		case "agent":
+			if len(opts.Agent) >= 2 {
+				tail := string(opts.Agent[len(opts.Agent)-1])
+				if _, known := Agents[AgentType(tail)]; !known && tail != "*" {
+					res.Sources = append(res.Sources, tail)
+					opts.Agent = opts.Agent[:len(opts.Agent)-1]
 				}
-			case "skill":
-				opts.Skill = opts.Skill[:len(opts.Skill)-1]
-				if len(opts.Skill) == 0 {
-					opts.Skill = nil
+			}
+		case "skill":
+			if len(opts.Skill) >= 2 {
+				tail := opts.Skill[len(opts.Skill)-1]
+				if addLooksLikeSource(tail) {
+					res.Sources = append(res.Sources, tail)
+					opts.Skill = opts.Skill[:len(opts.Skill)-1]
 				}
-			case "subagent":
-				opts.Subagent = opts.Subagent[:len(opts.Subagent)-1]
-				if len(opts.Subagent) == 0 {
-					opts.Subagent = nil
+			}
+		case "subagent":
+			if len(opts.Subagent) >= 2 {
+				tail := opts.Subagent[len(opts.Subagent)-1]
+				if addLooksLikeSource(tail) {
+					res.Sources = append(res.Sources, tail)
+					opts.Subagent = opts.Subagent[:len(opts.Subagent)-1]
 				}
 			}
 		}
@@ -471,6 +463,11 @@ type addUnit struct {
 	skill FetchedSkill
 }
 
+type categoryConflict struct {
+	path   string
+	skills []string
+}
+
 type addPlan struct {
 	units           []addUnit
 	targets         []InstallTarget
@@ -484,6 +481,47 @@ type addPlan struct {
 	recordSubagents bool
 	verbose         bool
 	via             string
+	conflicts       map[int]map[int]*categoryConflict
+}
+
+func findCategoryConflict(skillName string, target InstallTarget, global bool, cwd string) *categoryConflict {
+	agentPath := GetTargetInstallPath(skillName, target, global, cwd)
+	if skills := FindCategoryDirSkills(agentPath); len(skills) > 0 {
+		return &categoryConflict{path: agentPath, skills: skills}
+	}
+	canonicalPath := GetCanonicalPath(skillName, global, cwd)
+	if !PathsOverlap(agentPath, canonicalPath) {
+		if skills := FindCategoryDirSkills(canonicalPath); len(skills) > 0 {
+			return &categoryConflict{path: canonicalPath, skills: skills}
+		}
+	}
+	return nil
+}
+
+func buildCategoryConflicts(units []addUnit, targets []InstallTarget, global bool, cwd string) map[int]map[int]*categoryConflict {
+	var out map[int]map[int]*categoryConflict
+	for ui, u := range units {
+		name := addSkillName(u.skill.Skill)
+		for ti, t := range targets {
+			if c := findCategoryConflict(name, t, global, cwd); c != nil {
+				if out == nil {
+					out = make(map[int]map[int]*categoryConflict)
+				}
+				if out[ui] == nil {
+					out[ui] = make(map[int]*categoryConflict)
+				}
+				out[ui][ti] = c
+			}
+		}
+	}
+	return out
+}
+
+func (p addPlan) hasConflict(unitIdx, targetIdx int) *categoryConflict {
+	if p.conflicts == nil || p.conflicts[unitIdx] == nil {
+		return nil
+	}
+	return p.conflicts[unitIdx][targetIdx]
 }
 
 type unitResult struct {
@@ -494,8 +532,11 @@ type unitResult struct {
 
 func addExecuteInstall(plan addPlan) []unitResult {
 	var results []unitResult
-	for _, u := range plan.units {
-		for _, t := range plan.targets {
+	for ui, u := range plan.units {
+		for ti, t := range plan.targets {
+			if plan.hasConflict(ui, ti) != nil {
+				continue
+			}
 			res := InstallSkillForAgent(u.skill.Skill, t.Agent, InstallOptions{
 				Global:                 plan.global,
 				Cwd:                    plan.cwd,
@@ -913,6 +954,7 @@ func RunAdd(args []string) int {
 
 // RunAddWithIO runs `skl add` against the given streams and returns the exit code.
 func RunAddWithIO(args []string, aio AddIO) int {
+	RefreshColors(args...)
 	return RunAddParsed(ParseAddCLIOptions(args), aio)
 }
 
@@ -1088,9 +1130,14 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 		}
 	}
 
+	repoMetaCh := make(chan *GitHubRepoMetadata, 1)
+	go func(p ParsedSource) {
+		repoMetaCh <- lookupGitHubRepoFn(p)
+	}(parsed)
+
 	fetched, err := fetchSourceFn(SourceRequest{
 		Source: source, Parsed: &parsed, Skills: opts.Skill, FullDepth: opts.FullDepth,
-		IncludeInternal: includeInternal, Yes: opts.Yes, Cwd: cwd,
+		IncludeInternal: includeInternal, Yes: opts.Yes, Cwd: cwd, DeferWellKnownLoad: true,
 	})
 	var extra []*FetchedSource
 	defer func() {
@@ -1124,6 +1171,21 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 		return r.fail(1, e.Error())
 	}
 	fmt.Fprintf(r.out, "Found %d skill%s\n", len(skills), addPlural(len(skills)))
+
+	if repoMeta := <-repoMetaCh; repoMeta != nil && repoMeta.FullName != "" {
+		canonical := WithCanonicalGitHubRepo(parsed, repoMeta.FullName)
+		if canonical.URL != parsed.URL {
+			from := GetOwnerRepo(parsed)
+			to := GetOwnerRepo(canonical)
+			if from != "" && to != "" && !strings.EqualFold(from, to) {
+				fmt.Fprintf(r.out, "%s has moved to %s\n", from, to)
+			}
+			parsed = canonical
+			fetched.Parsed = canonical
+			fetched.Source = LockSource(canonical.URL, to)
+			fetched.SourceURL = canonical.URL
+		}
+	}
 
 	if opts.List {
 		addPrintAvailable(r.out, skills)
@@ -1337,13 +1399,24 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 
 	if fetched.SourceType == SourceTypeWellKnown {
 		units = addResolvePackPointers(units, cwd, r.out, &extra)
+		for i := range units {
+			if units[i].src.SourceType == SourceTypeWellKnown {
+				if err := units[i].skill.LoadWellKnown(); err != nil {
+					r.logError(err)
+					r.showTip()
+					fmt.Fprintln(r.out, "Installation failed")
+					return r.fail(1, err.Error())
+				}
+			}
+		}
 	}
 
 	recordSubagents := addHasAgent(targetAgents, "eve") && (len(eveSubagents) > 1 || (len(eveSubagents) == 1 && eveSubagents[0] != ""))
+	conflicts := buildCategoryConflicts(units, targets, global, cwd)
 	plan := addPlan{
 		units: units, targets: targets, targetAgents: targetAgents, global: global, mode: mode,
 		lockedCopy: lockedCopy, explicit: explicit, cwd: cwd, subagents: eveSubagents,
-		recordSubagents: recordSubagents, verbose: opts.Verbose,
+		recordSubagents: recordSubagents, verbose: opts.Verbose, conflicts: conflicts,
 	}
 
 	addPrintSummary(r.out, plan)
@@ -1381,6 +1454,10 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 				if res.unit.src == u.src && res.unit.skill.Path == u.skill.Path && res.unit.skill.Name == u.skill.Name {
 					mine = append(mine, res)
 				}
+			}
+			if len(mine) == 0 {
+				r.results = append(r.results, AddJSONResult{Name: name, Status: "skipped", Reason: "Conflicts with a category directory"})
+				continue
 			}
 			var firstFail *unitResult
 			for i := range mine {
@@ -1448,6 +1525,7 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 		}
 		exitCode = 1
 	}
+	warnCategoryConflicts(r.errw, plan)
 	fmt.Fprintln(r.out, "\nDone!  Review skills before use; they run with full agent permissions.")
 	return exitCode
 }
@@ -1651,6 +1729,9 @@ func addPrintAvailable(w io.Writer, skills []FetchedSkill) {
 		}
 		for _, s := range ungrouped {
 			fmt.Fprintf(w, "  %s\n    %s\n", addSkillName(s.Skill), s.Description)
+			if len(s.WellKnownFilePaths) > 1 {
+				fmt.Fprintf(w, "    Files: %s\n", strings.Join(s.WellKnownFilePaths, ", "))
+			}
 		}
 	}
 	fmt.Fprintln(w)
@@ -1685,9 +1766,34 @@ func addTargetSummaryLines(targets []InstallTarget, mode InstallMode, global boo
 	return lines
 }
 
+func categoryConflictLine(name string, conflict *categoryConflict) string {
+	shown := conflict.skills
+	ellipsis := ""
+	if len(shown) > 3 {
+		shown = shown[:3]
+		ellipsis = ", …"
+	}
+	detail := fmt.Sprintf("(%s/ contains %s%s)", filepath.Base(conflict.path), strings.Join(shown, ", "), ellipsis)
+	return fmt.Sprintf("  %sconflicts with category:%s %s %s%s%s", ansiRed, ansiReset, name, ansiDim, detail, ansiReset)
+}
+
+func warnCategoryConflicts(errw io.Writer, plan addPlan) {
+	seen := make(map[string]bool)
+	for ui := range plan.units {
+		for ti := range plan.targets {
+			c := plan.hasConflict(ui, ti)
+			if c == nil || seen[c.path] {
+				continue
+			}
+			seen[c.path] = true
+			fmt.Fprintln(errw, FormatError(ErrCategoryDirConflict(c.path, c.skills)))
+		}
+	}
+}
+
 func addPrintSummary(w io.Writer, plan addPlan) {
 	var lines []string
-	for _, u := range plan.units {
+	for ui, u := range plan.units {
 		if len(lines) > 0 {
 			lines = append(lines, "")
 		}
@@ -1699,16 +1805,24 @@ func addPrintSummary(w io.Writer, plan addPlan) {
 			canonical = GetCanonicalPath(name, plan.global, plan.cwd)
 		}
 		lines = append(lines, addShortenPath(canonical, plan.cwd))
-		lines = append(lines, addTargetSummaryLines(plan.targets, plan.mode, plan.global)...)
+		var planned []InstallTarget
 		var overwrites []string
-		for _, t := range plan.targets {
+		var conflictLines []string
+		for ti, t := range plan.targets {
+			if c := plan.hasConflict(ui, ti); c != nil {
+				conflictLines = append(conflictLines, categoryConflictLine(addTargetName(t), c))
+				continue
+			}
+			planned = append(planned, t)
 			if IsSkillInstalled(name, t.Agent, plan.global, plan.cwd, t.EveSubagent) {
 				overwrites = append(overwrites, addTargetName(t))
 			}
 		}
+		lines = append(lines, addTargetSummaryLines(planned, plan.mode, plan.global)...)
 		if len(overwrites) > 0 {
 			lines = append(lines, "  overwrites: "+addFormatList(overwrites, 5))
 		}
+		lines = append(lines, conflictLines...)
 	}
 	fmt.Fprintln(w, "\nInstallation Summary")
 	for _, l := range lines {

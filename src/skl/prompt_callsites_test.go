@@ -18,9 +18,15 @@ func withStdinTTY(t *testing.T, tty bool) {
 	// Ensure Unicode symbols are enabled on Windows too after lcHermetic clears CI,
 	// matching instTestEnv/testTerm so Unicode symbol assertions are OS-independent.
 	t.Setenv("WT_SESSION", "1")
-	orig := stdinIsTTY
+	t.Setenv("TERM", "xterm-256color")
+	origIn, origOut := stdinIsTTY, stdoutIsTTY
 	stdinIsTTY = func() bool { return tty }
-	t.Cleanup(func() { stdinIsTTY = orig })
+	stdoutIsTTY = func() bool { return tty }
+	RefreshColors()
+	t.Cleanup(func() {
+		stdinIsTTY, stdoutIsTTY = origIn, origOut
+		RefreshColors()
+	})
 }
 
 func plainOut(s string) string {

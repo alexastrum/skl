@@ -115,11 +115,14 @@ func TestRemoveSkills_EdgeCases(t *testing.T) {
 	}
 	del := filepath.Join(cwd, ".agents", "skills", "delete-all-me")
 	lcWriteSkill(t, del, "delete-all-me", "d")
+	lcWriteLocalLock(t, cwd, map[string]LocalSkillLockEntry{
+		"delete-all-me": {Source: "o/r", SourceType: "github", ComputedHash: "h"},
+	})
 	if err := RemoveSkills(nil, RemoveOptions{All: true, Yes: true}, cwd); err != nil {
 		t.Fatal(err)
 	}
 	if lcExists(del) {
-		t.Error("--all should delete every project skill")
+		t.Error("--all should delete every lock-tracked project skill")
 	}
 }
 
