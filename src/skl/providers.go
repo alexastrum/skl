@@ -1418,10 +1418,26 @@ type BlobSkill struct {
 	RepoPath string
 }
 
+// BlobFallbackReason explains why the GitHub repo tree could not be read (#2761).
+type BlobFallbackReason string
+
+const (
+	BlobFallbackRateLimited     BlobFallbackReason = "rate-limited"
+	BlobFallbackTreeUnavailable BlobFallbackReason = "tree-unavailable"
+)
+
+// BlobFallback is reported via OnFallback and `--json` entries when the blob fast
+// path falls back to cloning because the repo tree could not be read (#2761).
+type BlobFallback struct {
+	Reason BlobFallbackReason `json:"reason"`
+}
+
 // BlobInstallResult is the outcome of TryBlobInstall.
 type BlobInstallResult struct {
 	Skills []BlobSkill
 	Tree   *RepoTree
+	// Commit is the commit whose tree the snapshots were checked against, when known (#2735).
+	Commit string
 }
 
 // BlobInstallOptions tunes TryBlobInstall.
@@ -1431,6 +1447,9 @@ type BlobInstallOptions struct {
 	Ref             string
 	GetToken        func() string
 	IncludeInternal bool
+	// OnFallback is called when the repo tree cannot be read (#2761). Other nil
+	// returns (explicit ref, repo without skills, etc.) do not call it.
+	OnFallback func(BlobFallback)
 }
 
 // BlobAllowedOwners may use the skills.sh blob fast path for all their repos.
@@ -1475,45 +1494,50 @@ func providerGet(ctx context.Context, rawURL string, headers map[string]string) 
 	return providerHTTPClient.Do(req)
 }
 
-type treeFetchResult struct {
-	tree                       *RepoTree
+type githubAPIFetchResult[T any] struct {
+	value                      T
+	ok                         bool
 	rateLimited, authRetryable bool
 }
 
-func fpFetchTreeBranch(ownerRepo, branch, token string) treeFetchResult {
+type githubAPIParser[T any] func(body []byte) (T, bool)
+
+func fpFetchGitHubAPI[T any](endpoint, token string, parse githubAPIParser[T]) githubAPIFetchResult[T] {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	u := fmt.Sprintf("%s/repos/%s/git/trees/%s?recursive=1", githubAPIBase(), ownerRepo, fpEncodeURIComponent(branch))
+	u := fmt.Sprintf("%s/%s", githubAPIBase(), endpoint)
 	headers := map[string]string{"Accept": "application/vnd.github.v3+json", "User-Agent": "skills-cli"}
 	if token != "" {
 		headers["Authorization"] = "Bearer " + token
 	}
 	resp, err := providerGet(ctx, u, headers)
 	if err != nil {
-		return treeFetchResult{}
+		return githubAPIFetchResult[T]{}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
-		var t RepoTree
-		if json.NewDecoder(resp.Body).Decode(&t) != nil {
-			return treeFetchResult{}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+		if err != nil {
+			return githubAPIFetchResult[T]{}
 		}
-		t.Branch = branch
-		return treeFetchResult{tree: &t}
+		if v, ok := parse(body); ok {
+			return githubAPIFetchResult[T]{value: v, ok: true}
+		}
+		return githubAPIFetchResult[T]{}
 	}
-	return treeFetchResult{
+	return githubAPIFetchResult[T]{
 		rateLimited:   resp.StatusCode == 403 && resp.Header.Get("X-RateLimit-Remaining") == "0",
 		authRetryable: resp.StatusCode == 401 || resp.StatusCode == 404,
 	}
 }
 
-func fetchTreeWithGitHubCLI(ownerRepo string, branches []string) *RepoTree {
+func fetchGitHubAPIWithGitHubCLI[T any](endpoints []string, parsers []githubAPIParser[T]) (T, bool) {
+	var zero T
 	if _, err := exec.LookPath(fpGhBinary); err != nil {
-		return nil
+		return zero, false
 	}
-	for _, branch := range branches {
+	for i, endpoint := range endpoints {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		endpoint := fmt.Sprintf("repos/%s/git/trees/%s?recursive=1", ownerRepo, fpEncodeURIComponent(branch))
 		cmd := exec.CommandContext(ctx, fpGhBinary, "api", endpoint, "--method", "GET", "--hostname", GetGitHubHost())
 		cmd.Env = fpOverrideEnv(os.Environ(), "GH_PROMPT_DISABLED=1")
 		var out bytes.Buffer
@@ -1523,16 +1547,11 @@ func fetchTreeWithGitHubCLI(ownerRepo string, branches []string) *RepoTree {
 		if err != nil {
 			continue
 		}
-		var raw struct {
-			SHA  *string          `json:"sha"`
-			Tree *[]RepoTreeEntry `json:"tree"`
+		if v, ok := parsers[i](out.Bytes()); ok {
+			return v, true
 		}
-		if json.Unmarshal(out.Bytes(), &raw) != nil || raw.SHA == nil || raw.Tree == nil {
-			continue
-		}
-		return &RepoTree{SHA: *raw.SHA, Branch: branch, Tree: *raw.Tree}
 	}
-	return nil
+	return zero, false
 }
 
 type fpLimitedWriter struct {
@@ -1548,36 +1567,32 @@ func (l *fpLimitedWriter) Write(p []byte) (int, error) {
 	return l.w.Write(p)
 }
 
-func fetchTreeWithAuth(ownerRepo string, branches []string, getToken func() string) *RepoTree {
+func fetchGitHubAPIWithAuth[T any](endpoints []string, parsers []githubAPIParser[T], getToken func() string) (T, bool) {
 	if getToken != nil {
 		if token := getToken(); token != "" {
-			for _, b := range branches {
-				if r := fpFetchTreeBranch(ownerRepo, b, token); r.tree != nil {
-					return r.tree
+			for i, endpoint := range endpoints {
+				if r := fpFetchGitHubAPI(endpoint, token, parsers[i]); r.ok {
+					return r.value, true
 				}
 			}
 		}
 	}
-	return fetchTreeWithGitHubCLI(ownerRepo, branches)
+	return fetchGitHubAPIWithGitHubCLI(endpoints, parsers)
 }
 
-// FetchRepoTree fetches the recursive tree for a GitHub repo, trying ref (or
-// HEAD, main, master). Requests are unauthenticated first; only a rate-limit
-// 403 or a private-repo 401/404 retries with getToken() and then `gh api`.
-// Returns (nil, nil) when the tree cannot be fetched.
-func FetchRepoTree(ownerRepo, ref string, getToken func() string) (*RepoTree, error) {
-	branches := []string{"HEAD", "main", "master"}
-	if ref != "" {
-		branches = []string{ref}
-	}
+// fetchFirstGitHubAPI calls endpoints in order using lazy authentication: unauthenticated
+// first, retrying with getToken() and then `gh api` only on rate-limit 403 or private-repo
+// 401/404 (#523, #1318, #2735).
+func fetchFirstGitHubAPI[T any](endpoints []string, parsers []githubAPIParser[T], getToken func() string) (T, bool) {
+	var zero T
 	if rateLimitedThisSession.Load() {
-		return fetchTreeWithAuth(ownerRepo, branches, getToken), nil
+		return fetchGitHubAPIWithAuth(endpoints, parsers, getToken)
 	}
 	rateLimited, authRetryable := false, false
-	for _, b := range branches {
-		r := fpFetchTreeBranch(ownerRepo, b, "")
-		if r.tree != nil {
-			return r.tree, nil
+	for i, endpoint := range endpoints {
+		r := fpFetchGitHubAPI(endpoint, "", parsers[i])
+		if r.ok {
+			return r.value, true
 		}
 		if r.rateLimited {
 			rateLimited = true
@@ -1589,12 +1604,84 @@ func FetchRepoTree(ownerRepo, ref string, getToken func() string) (*RepoTree, er
 		}
 	}
 	if !rateLimited && !authRetryable {
-		return nil, nil
+		return zero, false
 	}
 	if rateLimited {
 		rateLimitedThisSession.Store(true)
 	}
-	return fetchTreeWithAuth(ownerRepo, branches, getToken), nil
+	return fetchGitHubAPIWithAuth(endpoints, parsers, getToken)
+}
+
+// FetchRepoTree fetches the recursive tree for a GitHub repo, trying ref (or
+// HEAD, main, master). Requests are unauthenticated first; only a rate-limit
+// 403 or a private-repo 401/404 retries with getToken() and then `gh api`.
+// Returns (nil, nil) when the tree cannot be fetched.
+func FetchRepoTree(ownerRepo, ref string, getToken func() string) (*RepoTree, error) {
+	branches := []string{"HEAD", "main", "master"}
+	if ref != "" {
+		branches = []string{ref}
+	}
+	endpoints := make([]string, len(branches))
+	parsers := make([]githubAPIParser[*RepoTree], len(branches))
+	for i, b := range branches {
+		branch := b
+		endpoints[i] = fmt.Sprintf("repos/%s/git/trees/%s?recursive=1", ownerRepo, fpEncodeURIComponent(branch))
+		parsers[i] = func(body []byte) (*RepoTree, bool) {
+			var raw struct {
+				SHA  *string          `json:"sha"`
+				Tree *[]RepoTreeEntry `json:"tree"`
+			}
+			if json.Unmarshal(body, &raw) != nil || raw.SHA == nil || raw.Tree == nil {
+				return nil, false
+			}
+			return &RepoTree{SHA: *raw.SHA, Branch: branch, Tree: *raw.Tree}, true
+		}
+	}
+	tree, ok := fetchFirstGitHubAPI(endpoints, parsers, getToken)
+	if !ok {
+		return nil, nil
+	}
+	return tree, nil
+}
+
+// FetchTreeCommit returns the commit at the tip of tree.Branch when it is still the
+// commit tree was read from, or "" if it cannot be read or the branch moved since tree
+// was fetched (#2735).
+func FetchTreeCommit(ownerRepo string, tree *RepoTree, getToken func() string) string {
+	if tree == nil {
+		return ""
+	}
+	branchQuery := ""
+	if tree.Branch != "" && tree.Branch != "HEAD" {
+		branchQuery = "&sha=" + fpEncodeURIComponent(tree.Branch)
+	}
+	endpoint := fmt.Sprintf("repos/%s/commits?per_page=1%s", ownerRepo, branchQuery)
+	parser := func(body []byte) (string, bool) {
+		var list []struct {
+			SHA    string `json:"sha"`
+			Commit struct {
+				Tree struct {
+					SHA string `json:"sha"`
+				} `json:"tree"`
+			} `json:"commit"`
+		}
+		if json.Unmarshal(body, &list) != nil || len(list) == 0 {
+			return "", false
+		}
+		latest := list[0]
+		if !IsCommitSHA(latest.SHA) {
+			return "", false
+		}
+		if latest.SHA == tree.SHA || latest.Commit.Tree.SHA == tree.SHA {
+			return strings.ToLower(latest.SHA), true
+		}
+		return "", false
+	}
+	sha, ok := fetchFirstGitHubAPI([]string{endpoint}, []githubAPIParser[string]{parser}, getToken)
+	if !ok {
+		return ""
+	}
+	return sha
 }
 
 // GetSkillFolderHashFromTree returns the tree SHA of the folder holding
@@ -1923,6 +2010,13 @@ func TryBlobInstall(ownerRepo string, opts BlobInstallOptions) (*BlobInstallResu
 	}
 	tree, _ := FetchRepoTree(ownerRepo, "", opts.GetToken)
 	if tree == nil {
+		if opts.OnFallback != nil {
+			reason := BlobFallbackTreeUnavailable
+			if rateLimitedThisSession.Load() {
+				reason = BlobFallbackRateLimited
+			}
+			opts.OnFallback(BlobFallback{Reason: reason})
+		}
 		return nil, nil
 	}
 	extra := fetchSkillsShPathsFromTree(ownerRepo, tree, opts.Subpath)
@@ -2024,6 +2118,7 @@ func TryBlobInstall(ownerRepo string, opts BlobInstallOptions) (*BlobInstallResu
 			RepoPath:     p.mdPath,
 		})
 	}
+	result.Commit = FetchTreeCommit(ownerRepo, tree, opts.GetToken)
 	return result, nil
 }
 
@@ -2749,6 +2844,9 @@ type SourceRequest struct {
 	// LockedSkillPaths optionally lists locked SKILL.md relative paths to read
 	// directly from a cloned repo before falling back to full discovery (#2721, #2726).
 	LockedSkillPaths []string
+	// OnBlobFallback is called when the blob fast path cannot read the repo tree
+	// and falls back to cloning (#2761).
+	OnBlobFallback func(BlobFallback)
 }
 
 // FetchedSkill is one discovered skill materialized on local disk.
@@ -2817,6 +2915,8 @@ type FetchedSource struct {
 	SourceURL string
 	// Ref is the git ref that was requested (empty for default branch).
 	Ref string
+	// Commit is the Git commit the skills were read from, for Git sources when known (#2735).
+	Commit string
 	// RootDir is the materialized source root (repo checkout, extracted
 	// archive root, staged well-known dir, or the local path itself).
 	RootDir string
@@ -2828,6 +2928,9 @@ type FetchedSource struct {
 	Skills []FetchedSkill
 	// Tree is the GitHub tree when fetched via the blob path (else nil).
 	Tree *RepoTree
+	// BlobFallback is set when the blob fast path was tried and the repo tree could
+	// not be read, forcing a fallback to git clone (#2761).
+	BlobFallback *BlobFallback
 }
 
 // Cleanup removes the temporary directory (no-op for local sources).
@@ -3050,9 +3153,16 @@ func FetchSource(req SourceRequest) (*FetchedSource, error) {
 		out.Source = parsed.URL
 	}
 
+	var blobFallback *BlobFallback
 	if parsed.Type == SourceTypeGitHub && !req.FullDepth && !req.NoBlob && IsBlobEligible(ownerRepo) {
-		blob, _ := TryBlobInstall(ownerRepo, BlobInstallOptions{Subpath: parsed.Subpath, SkillFilter: parsed.SkillFilter,
-			Ref: parsed.Ref, GetToken: GetGitHubToken, IncludeInternal: includeInternal})
+		blob, _ := TryBlobInstall(ownerRepo, BlobInstallOptions{
+			Subpath: parsed.Subpath, SkillFilter: parsed.SkillFilter,
+			Ref: parsed.Ref, GetToken: GetGitHubToken, IncludeInternal: includeInternal,
+			OnFallback: func(fb BlobFallback) {
+				cp := fb
+				blobFallback = &cp
+			},
+		})
 		if blob != nil {
 			plain := make([]Skill, len(blob.Skills))
 			for i, b := range blob.Skills {
@@ -3061,6 +3171,9 @@ func FetchSource(req SourceRequest) (*FetchedSource, error) {
 			if !MissingRequestedSkill(plain, requested) {
 				return materializeBlob(out, blob)
 			}
+		}
+		if req.OnBlobFallback != nil && blobFallback != nil {
+			req.OnBlobFallback(*blobFallback)
 		}
 	}
 
@@ -3071,6 +3184,8 @@ func FetchSource(req SourceRequest) (*FetchedSource, error) {
 	out.TempDir = cloneDir
 	out.RootDir = cloneDir
 	out.Via = "clone"
+	out.Commit = GetHeadCommit(cloneDir)
+	out.BlobFallback = blobFallback
 	if len(req.LockedSkillPaths) > 0 && parsed.Subpath == "" {
 		if locked := readLockedCloneSkills(cloneDir, req.LockedSkillPaths, includeInternal); len(locked) > 0 {
 			out.Skills = locked
@@ -3179,6 +3294,7 @@ func materializeBlob(out *FetchedSource, blob *BlobInstallResult) (*FetchedSourc
 	out.RootDir = tmp
 	out.Via = "blob"
 	out.Tree = blob.Tree
+	out.Commit = blob.Commit
 	for _, b := range blob.Skills {
 		// Root skills live in their own subtree so their folder never
 		// contains the nested skills of the same repo.

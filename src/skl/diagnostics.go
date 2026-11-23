@@ -10,17 +10,17 @@ import (
 // SKILLS_<WHAT_WENT_WRONG> and permanent: never rename or reuse one.
 const (
 	// Command line.
-	CodeInvalidAgents         = "SKILLS_INVALID_AGENTS"
-	CodeOptionRequiresValue   = "SKILLS_OPTION_REQUIRES_VALUE"
-	CodeOptionTakesNoValue    = "SKILLS_OPTION_TAKES_NO_VALUE"
-	CodeUnknownOption         = "SKILLS_UNKNOWN_OPTION"
-	CodeInvalidOptionValue    = "SKILLS_INVALID_OPTION_VALUE"
-	CodeDuplicateOption       = "SKILLS_DUPLICATE_OPTION"
-	CodeRemoveAllWithNames    = "SKILLS_REMOVE_ALL_WITH_NAMES"
-	CodePromptRequiresTTY     = "SKILLS_PROMPT_REQUIRES_TTY"
-	CodeMissingArgument       = "SKILLS_MISSING_ARGUMENT"
-	CodeMultipleSources       = "SKILLS_MULTIPLE_SOURCES"
-	CodeUnknownCommand        = "SKILLS_UNKNOWN_COMMAND"
+	CodeInvalidAgents          = "SKILLS_INVALID_AGENTS"
+	CodeOptionRequiresValue    = "SKILLS_OPTION_REQUIRES_VALUE"
+	CodeOptionTakesNoValue     = "SKILLS_OPTION_TAKES_NO_VALUE"
+	CodeUnknownOption          = "SKILLS_UNKNOWN_OPTION"
+	CodeInvalidOptionValue     = "SKILLS_INVALID_OPTION_VALUE"
+	CodeDuplicateOption        = "SKILLS_DUPLICATE_OPTION"
+	CodeRemoveAllWithNames     = "SKILLS_REMOVE_ALL_WITH_NAMES"
+	CodePromptRequiresTTY      = "SKILLS_PROMPT_REQUIRES_TTY"
+	CodeMissingArgument        = "SKILLS_MISSING_ARGUMENT"
+	CodeMultipleSources        = "SKILLS_MULTIPLE_SOURCES"
+	CodeUnknownCommand         = "SKILLS_UNKNOWN_COMMAND"
 	CodeRemoveGloballyTracked  = "SKILLS_REMOVE_GLOBALLY_TRACKED"
 	CodeRemoveUntrackedSkipped = "SKILLS_REMOVE_UNTRACKED_SKIPPED"
 	CodeRemoveUnmanagedDirKept = "SKILLS_REMOVE_UNMANAGED_DIR_KEPT"
@@ -31,6 +31,7 @@ const (
 	CodeNoMatchingSkills          = "SKILLS_NO_MATCHING_SKILLS"
 	CodeNoValidSkills             = "SKILLS_NO_VALID_SKILLS"
 	CodeMultipleSkillsInSource    = "SKILLS_MULTIPLE_SKILLS_IN_SOURCE"
+	CodeRenameMultipleSkills      = "SKILLS_RENAME_MULTIPLE_SKILLS"
 	CodeAmbiguousSkillSelector    = "SKILLS_AMBIGUOUS_SKILL_SELECTOR"
 	CodeConflictingSkillSelectors = "SKILLS_CONFLICTING_SKILL_SELECTORS"
 	CodeLocalPathNotFound         = "SKILLS_LOCAL_PATH_NOT_FOUND"
@@ -76,6 +77,7 @@ const (
 	CodeBrokenSymlink         = "SKILLS_BROKEN_SYMLINK"
 	CodeLockMissingSourceURL  = "SKILLS_LOCK_MISSING_SOURCE_URL"
 	CodeInvalidLocalLock      = "SKILLS_INVALID_LOCAL_LOCK"
+	CodeLocalLockBusy         = "SKILLS_LOCAL_LOCK_BUSY"
 	CodeSymlinkOutsideSkill   = "SKILLS_SYMLINK_OUTSIDE_SKILL"
 	CodeSymlinkCycle          = "SKILLS_SYMLINK_CYCLE"
 	CodeCategoryDirConflict   = "SKILLS_CATEGORY_DIR_CONFLICT"
@@ -397,6 +399,13 @@ func ErrMultipleSkillsInSource(cliName, source string, names []string) *Diagnost
 		fmt.Sprintf("Examples:\n  %s use %s@%s\n  %s use %s --skill %s", cliName, source, example, cliName, source, example))
 }
 
+// ErrRenameMultipleSkills reports `--rename` when the selection is not a single skill (#2722).
+func ErrRenameMultipleSkills(count int) *DiagnosticError {
+	return NewDiagnostic(CodeRenameMultipleSkills,
+		fmt.Sprintf("--rename installs one skill under a new name, but %d skills were selected.", count),
+		"Pick one skill with --skill <name> or <source>@<skill>.")
+}
+
 // ErrAmbiguousSkillSelector reports a selector matching several skills.
 func ErrAmbiguousSkillSelector(selector string) *DiagnosticError {
 	return Diagnosticf(CodeAmbiguousSkillSelector, "Skill selector \"%s\" matched multiple skills.", selector)
@@ -469,6 +478,13 @@ func ErrLockMissingSourceURL(skill string) *DiagnosticError {
 func ErrInvalidLocalLockFile(path, reason string) *DiagnosticError {
 	return Diagnosticf(CodeInvalidLocalLock, "Invalid %s: %s. Fix or delete the file, then retry.", path, reason).
 		WithCause(ErrInvalidLocalLock)
+}
+
+// ErrLocalLockBusy reports a timeout waiting on the skills-lock.json companion lock file (#2750).
+func ErrLocalLockBusy(path string, cause error) *DiagnosticError {
+	return Diagnosticf(CodeLocalLockBusy,
+		"Timed out waiting for %s: another skills process is updating skills-lock.json. If none is running, delete the file, then retry.",
+		path).WithCause(cause)
 }
 
 // ErrPackageSkillsNotArray reports package.json "skills" that is not an array.

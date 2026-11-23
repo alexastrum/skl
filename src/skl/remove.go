@@ -219,7 +219,9 @@ type RemoveSkillResult struct {
 	Success    bool
 	Source     string
 	SourceType string
-	Error      string
+	// SkillName is the name of the skill in its source when installed with `--rename` (#2722).
+	SkillName string
+	Error     string
 }
 
 // RemoveInstalledOptions configures RemoveInstalledSkills.
@@ -366,7 +368,7 @@ func RemoveInstalledSkills(skills []string, opts RemoveInstalledOptions) []Remov
 			gl, _ := ReadSkillLock()
 			key := lockKeyFor(skillName, keysOf(gl.Skills))
 			if e, ok := gl.Skills[key]; ok {
-				res.Source, res.SourceType = nonEmpty(e.Source, "local"), nonEmpty(e.SourceType, "local")
+				res.Source, res.SourceType, res.SkillName = nonEmpty(e.Source, "local"), nonEmpty(e.SourceType, "local"), e.SkillName
 			}
 			if updateLock && key != "" {
 				if _, err := RemoveSkillFromLock(key); err != nil {
@@ -382,7 +384,7 @@ func RemoveInstalledSkills(skills []string, opts RemoveInstalledOptions) []Remov
 			}
 			key := lockKeyFor(skillName, keysOf(ll.Skills))
 			if e, ok := ll.Skills[key]; ok {
-				res.Source, res.SourceType = nonEmpty(e.Source, "local"), nonEmpty(e.SourceType, "local")
+				res.Source, res.SourceType, res.SkillName = nonEmpty(e.Source, "local"), nonEmpty(e.SourceType, "local"), e.SkillName
 			}
 			if updateLock && key != "" {
 				if _, err := RemoveSkillFromLocalLock(key, cwd); err != nil {

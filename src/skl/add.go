@@ -43,41 +43,52 @@ type AddIO struct {
 
 // AddJSONResult is one entry of `skl add --json` output.
 type AddJSONResult struct {
-	Name     string      `json:"name,omitempty"`
-	Status   string      `json:"status"` // installed | skipped | failed
-	Source   string      `json:"source,omitempty"`
-	Ref      *string     `json:"ref"`
-	Hash     *string     `json:"hash"`
-	Path     string      `json:"path,omitempty"`
-	Scope    string      `json:"scope,omitempty"`
-	Agents   []string    `json:"agents,omitempty"`
-	Mode     InstallMode `json:"mode,omitempty"`
-	Security interface{} `json:"security"`
-	Reason   string      `json:"reason,omitempty"`
-	Error    string      `json:"error,omitempty"`
+	Name     string        `json:"name,omitempty"`
+	Status   string        `json:"status"` // installed | skipped | failed
+	Source   string        `json:"source,omitempty"`
+	Ref      *string       `json:"ref"`
+	Hash     *string       `json:"hash"`
+	Path     string        `json:"path,omitempty"`
+	Scope    string        `json:"scope,omitempty"`
+	Agents   []string      `json:"agents,omitempty"`
+	Mode     InstallMode   `json:"mode,omitempty"`
+	Security interface{}   `json:"security"`
+	Reason   string        `json:"reason,omitempty"`
+	Error    string        `json:"error,omitempty"`
+	Fallback *BlobFallback `json:"fallback,omitempty"`
 }
 
 // MarshalJSON emits the upstream shapes: installed entries carry explicit nulls for
 // ref/hash/security, skipped and failed entries only their own fields.
 func (r AddJSONResult) MarshalJSON() ([]byte, error) {
+	marshalNoEscape := func(v interface{}) ([]byte, error) {
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(v); err != nil {
+			return nil, err
+		}
+		return bytes.TrimRight(buf.Bytes(), "\n"), nil
+	}
 	if r.Status == "installed" {
 		type installed struct {
-			Name     string      `json:"name,omitempty"`
-			Status   string      `json:"status"`
-			Source   string      `json:"source,omitempty"`
-			Ref      *string     `json:"ref"`
-			Hash     *string     `json:"hash"`
-			Path     string      `json:"path,omitempty"`
-			Scope    string      `json:"scope,omitempty"`
-			Agents   []string    `json:"agents"`
-			Mode     InstallMode `json:"mode,omitempty"`
-			Security interface{} `json:"security"`
+			Name     string        `json:"name,omitempty"`
+			Status   string        `json:"status"`
+			Source   string        `json:"source,omitempty"`
+			Ref      *string       `json:"ref"`
+			Hash     *string       `json:"hash"`
+			Path     string        `json:"path,omitempty"`
+			Scope    string        `json:"scope,omitempty"`
+			Agents   []string      `json:"agents"`
+			Mode     InstallMode   `json:"mode,omitempty"`
+			Security interface{}   `json:"security"`
+			Fallback *BlobFallback `json:"fallback,omitempty"`
 		}
 		agents := r.Agents
 		if agents == nil {
 			agents = []string{}
 		}
-		return json.Marshal(installed{r.Name, r.Status, r.Source, r.Ref, r.Hash, r.Path, r.Scope, agents, r.Mode, r.Security})
+		return marshalNoEscape(installed{r.Name, r.Status, r.Source, r.Ref, r.Hash, r.Path, r.Scope, agents, r.Mode, r.Security, r.Fallback})
 	}
 	type other struct {
 		Name   string `json:"name,omitempty"`
@@ -85,7 +96,7 @@ func (r AddJSONResult) MarshalJSON() ([]byte, error) {
 		Reason string `json:"reason,omitempty"`
 		Error  string `json:"error,omitempty"`
 	}
-	return json.Marshal(other{r.Name, r.Status, r.Reason, r.Error})
+	return marshalNoEscape(other{r.Name, r.Status, r.Reason, r.Error})
 }
 
 // addDetectAgent is overridable in tests.
@@ -130,6 +141,7 @@ var addOptionSpec = map[string]CLIOptionSpec{
 	"skill":      {Type: CLIOptionList, Short: "s", Value: "a skill name"},
 	"subagent":   {Type: CLIOptionList, Value: "a subagent name"},
 	"metadata":   {Type: CLIOptionString, Value: "a JSON value"},
+	"rename":     {Type: CLIOptionString, Value: "a skill name"},
 }
 
 // ParseAddCLIOptions parses `skl add` arguments with upstream semantics (#2712): -a/--agent,
@@ -177,6 +189,14 @@ func ParseAddCLIOptions(args []string) ParsedAddCLI {
 	}
 	for _, tok := range cli.Strings["subagent"] {
 		opts.Subagent = append(opts.Subagent, addSplitCommas(tok)...)
+	}
+	if renames := cli.Strings["rename"]; len(renames) > 0 {
+		rename := renames[len(renames)-1]
+		if err := ValidateRename(rename, "--rename"); err != nil {
+			res.Errors = append(res.Errors, err)
+		} else {
+			opts.Rename = rename
+		}
 	}
 	for _, m := range cli.Strings["metadata"] {
 		if json.Valid([]byte(m)) {
@@ -262,6 +282,86 @@ func addSkillName(s Skill) string {
 		return s.Name
 	}
 	return filepath.Base(s.Path)
+}
+
+// RenameSkill returns skill installed as name: its folder, lock key and SKILL.md `name`
+// become name, and RenamedFrom keeps the name the source uses so update and restore can
+// find it again. Renaming back to the source name clears RenamedFrom (#2722).
+func RenameSkill(skill Skill, name string) Skill {
+	sourceName := skill.RenamedFrom
+	if sourceName == "" {
+		sourceName = skill.Name
+	}
+	if name == skill.Name {
+		return skill
+	}
+	skill.Name = name
+	if name == sourceName {
+		skill.RenamedFrom = ""
+	} else {
+		skill.RenamedFrom = sourceName
+	}
+	return skill
+}
+
+// RenameFetchedSkill applies RenameSkill to a FetchedSkill, also updating InstallName.
+func RenameFetchedSkill(skill FetchedSkill, name string) FetchedSkill {
+	skill.Skill = RenameSkill(skill.Skill, name)
+	if skill.InstallName != "" {
+		skill.InstallName = name
+	}
+	return skill
+}
+
+// SourceSkillName returns the name a skill has in its source (before any `--rename`).
+func SourceSkillName(skill Skill) string {
+	if skill.RenamedFrom != "" {
+		return skill.RenamedFrom
+	}
+	return GetSkillDisplayName(skill)
+}
+
+// ValidateRename checks that name is already a safe folder name so the lock key,
+// folder, and SKILL.md all carry the exact name the user typed (#2722).
+func ValidateRename(name, option string) *DiagnosticError {
+	if option == "" {
+		option = "--rename"
+	}
+	if name != "" && SanitizeName(name) == name {
+		return nil
+	}
+	return ErrInvalidOptionValue(option, fmt.Sprintf("a skill name of lowercase letters, digits, \".\", \"_\" and \"-\" (e.g. %s)", SanitizeName(name)))
+}
+
+// ApplyRename renames the single selected skill to name per `--rename`; fails with
+// SKILLS_RENAME_MULTIPLE_SKILLS unless exactly one skill was selected (#2722).
+func ApplyRename(skills []FetchedSkill, name string) ([]FetchedSkill, error) {
+	if name == "" {
+		return skills, nil
+	}
+	if len(skills) != 1 {
+		return nil, ErrRenameMultipleSkills(len(skills))
+	}
+	return []FetchedSkill{RenameFetchedSkill(skills[0], name)}, nil
+}
+
+// SourceSkillHash computes the project lock's computedHash for skill. A renamed skill is
+// hashed with the new name in its SKILL.md, as the installer writes it, so the installed
+// copy verifies against the lock (#2722).
+func SourceSkillHash(skill Skill) (string, error) {
+	if skill.RenamedFrom == "" {
+		return ComputeSkillFolderHash(skill.Path)
+	}
+	files, err := CollectSkillFolderFiles(skill.Path)
+	if err != nil {
+		return "", err
+	}
+	for i := range files {
+		if files[i].Path == "SKILL.md" {
+			files[i].Content = []byte(SetFrontmatterName(string(files[i].Content), skill.Name))
+		}
+	}
+	return HashSkillFiles(files), nil
 }
 
 // addFilterFetched applies FilterSkills to fetched skills, preserving fetched metadata.
@@ -545,6 +645,22 @@ func addExecuteInstall(plan addPlan) []unitResult {
 				CreateMissingAgentRoot: plan.explicit[t.Agent],
 				Verbose:                plan.verbose,
 			})
+			// A skipped result without a reason means the source is the destination;
+			// never rewrite the user's own copy (#2722).
+			if u.skill.RenamedFrom != "" && res.Success && !(res.Skipped && res.SkipReason == "") {
+				seenPaths := map[string]bool{}
+				for _, p := range []string{res.CanonicalPath, res.Path} {
+					if p == "" || seenPaths[p] {
+						continue
+					}
+					seenPaths[p] = true
+					if err := SetInstalledSkillName(p, u.skill.Name); err != nil {
+						res.Success = false
+						res.Error = err.Error()
+						break
+					}
+				}
+			}
 			results = append(results, unitResult{unit: u, target: t, res: res})
 		}
 	}
@@ -572,9 +688,10 @@ func addFirstSuccessful(results []unitResult, u addUnit) *unitResult {
 }
 
 // addUnitHash is the content hash recorded in the project lock: the skill folder at its
-// source, or the installed copy for well-known skills (upstream installedSkillHash).
+// source (with rewritten SKILL.md name when renamed), or the installed copy for well-known
+// skills (upstream installedSkillHash).
 func addUnitHash(u addUnit, installed *unitResult) (string, error) {
-	if u.src.Via == "blob" && u.skill.ComputedHash != "" {
+	if u.skill.RenamedFrom == "" && u.src.Via == "blob" && u.skill.ComputedHash != "" {
 		return u.skill.ComputedHash, nil
 	}
 	if u.src.SourceType == SourceTypeWellKnown && installed != nil {
@@ -584,7 +701,7 @@ func addUnitHash(u addUnit, installed *unitResult) (string, error) {
 		}
 		return ComputeSkillFolderHash(p)
 	}
-	return ComputeSkillFolderHash(u.skill.Path)
+	return SourceSkillHash(u.skill.Skill)
 }
 
 func addGlobalFolderHash(u addUnit) string {
@@ -649,6 +766,7 @@ func addRecordLocks(plan addPlan, results []unitResult, warn io.Writer) (map[str
 				SourceType:  src.SourceType,
 				SourceUrl:   src.SourceURL,
 				Ref:         src.Ref,
+				SkillName:   u.skill.RenamedFrom,
 				PluginName:  u.skill.PluginName,
 				InstallMode: installMode,
 			}
@@ -663,11 +781,12 @@ func addRecordLocks(plan addPlan, results []unitResult, warn io.Writer) (map[str
 			case SourceTypeDownload:
 				entry.SourceUrl = downloadURL
 				entry.SkillPath = u.skill.SkillPath
-				entry.SkillFolderHash, _ = ComputeSkillFolderHash(u.skill.Path)
+				entry.SkillFolderHash, _ = SourceSkillHash(u.skill.Skill)
 				entry.Ref = ""
 			case SourceTypeLocal:
 				entry.SkillFolderHash = addGlobalFolderHash(u)
 			default:
+				entry.Commit = src.Commit
 				entry.SkillPath = u.skill.SkillPath
 				entry.SkillFolderHash = addGlobalFolderHash(u)
 			}
@@ -688,6 +807,7 @@ func addRecordLocks(plan addPlan, results []unitResult, warn io.Writer) (map[str
 		entry := LocalSkillLockEntry{
 			Source:       src.Source,
 			SourceType:   src.SourceType,
+			SkillName:    u.skill.RenamedFrom,
 			ComputedHash: hash,
 			InstallMode:  installMode,
 		}
@@ -705,6 +825,7 @@ func addRecordLocks(plan addPlan, results []unitResult, warn io.Writer) (map[str
 				entry.SourceUrl = src.SourceURL
 			}
 			entry.Ref = src.Ref
+			entry.Commit = src.Commit
 			entry.SkillPath = u.skill.SkillPath
 		}
 		if plan.recordSubagents {
@@ -800,14 +921,23 @@ func addResolvePackPointers(units []addUnit, cwd string, out io.Writer, extra *[
 
 // addStagedCopyHash hashes the copy CopySkillDirectory would install from dir.
 func addStagedCopyHash(dir string) (string, error) {
+	return addStagedCopyHashForSkill(Skill{Path: dir})
+}
+
+func addStagedCopyHashForSkill(skill Skill) (string, error) {
 	tmp, err := os.MkdirTemp("", "skills-hash-")
 	if err != nil {
 		return "", err
 	}
 	defer os.RemoveAll(tmp)
 	staged := filepath.Join(tmp, "skill")
-	if err := CopySkillDirectory(dir, staged, "", false); err != nil {
+	if err := CopySkillDirectory(skill.Path, staged, "", false); err != nil {
 		return "", err
+	}
+	if skill.RenamedFrom != "" {
+		if err := SetInstalledSkillName(staged, skill.Name); err != nil {
+			return "", err
+		}
 	}
 	return ComputeSkillFolderHash(staged)
 }
@@ -816,6 +946,9 @@ func addStagedCopyHash(dir string) (string, error) {
 type InstallFromSourceOptions struct {
 	// Skills selects skills by name (FilterSkills rules); all when empty.
 	Skills []string
+	// Select optionally transforms or filters the matched skills before installing (e.g.
+	// applying renames during restore or sync).
+	Select func([]FetchedSkill) []FetchedSkill
 	Agents []AgentType
 	// Via is recorded on project lock entries (e.g. an npm package name).
 	Via string
@@ -848,6 +981,9 @@ func InstallFromSource(f *FetchedSource, o InstallFromSourceOptions) SourceInsta
 	if len(o.Skills) > 0 {
 		selected = addFilterFetched(f.Skills, o.Skills)
 	}
+	if o.Select != nil {
+		selected = o.Select(selected)
+	}
 	if len(selected) == 0 {
 		res.Error = "No matching skills found"
 		return res
@@ -875,7 +1011,7 @@ func InstallFromSource(f *FetchedSource, o InstallFromSourceOptions) SourceInsta
 		// installed, so hash a staged copy of them.
 		changes := frozenChanges(func(u addUnit) (string, bool) {
 			if u.src.SourceType == SourceTypeWellKnown {
-				h, err := addStagedCopyHash(u.skill.Path)
+				h, err := addStagedCopyHashForSkill(u.skill.Skill)
 				return h, err == nil
 			}
 			h, err := addUnitHash(u, nil)
@@ -1135,9 +1271,23 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 		repoMetaCh <- lookupGitHubRepoFn(p)
 	}(parsed)
 
+	warnedRateLimit := false
+	warnRateLimitFallback := func(fb BlobFallback) {
+		if fb.Reason != BlobFallbackRateLimited || warnedRateLimit {
+			return
+		}
+		warnedRateLimit = true
+		fmt.Fprintf(r.out, "%sGitHub API rate limit reached, falling back to git clone (slower)%s\n", ansiYellow, ansiReset)
+		// With a token already set, the authenticated retry failed too; the tip would not help (#2761).
+		if GetGitHubToken() == "" {
+			fmt.Fprintf(r.out, "%sTip: run `gh auth login` or set GITHUB_TOKEN to use the fast path.%s\n", ansiDim, ansiReset)
+		}
+	}
+
 	fetched, err := fetchSourceFn(SourceRequest{
 		Source: source, Parsed: &parsed, Skills: opts.Skill, FullDepth: opts.FullDepth,
 		IncludeInternal: includeInternal, Yes: opts.Yes, Cwd: cwd, DeferWellKnownLoad: true,
+		OnBlobFallback: warnRateLimitFallback,
 	})
 	var extra []*FetchedSource
 	defer func() {
@@ -1158,6 +1308,9 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 		r.showTip()
 		fmt.Fprintln(r.out, "Installation failed")
 		return r.fail(1, msg)
+	}
+	if fetched.BlobFallback != nil {
+		warnRateLimitFallback(*fetched.BlobFallback)
 	}
 
 	if IsNotionSource(source) || ParseNotionSkillURL(source) != "" {
@@ -1240,6 +1393,15 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 		if err != nil {
 			return r.cancelled(err)
 		}
+	}
+
+	if opts.Rename != "" {
+		renamed, err := ApplyRename(selected, opts.Rename)
+		if err != nil {
+			r.logError(err)
+			return r.fail(1, err.Error())
+		}
+		selected = renamed
 	}
 
 	units := make([]addUnit, 0, len(selected))
@@ -1398,7 +1560,10 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 	lockedCopy := mode == InstallModeCopy && (opts.Copy || defaultMode == InstallModeSymlink)
 
 	if fetched.SourceType == SourceTypeWellKnown {
-		units = addResolvePackPointers(units, cwd, r.out, &extra)
+		// A renamed skill always installs from the pack's copy (#2722).
+		if opts.Rename == "" {
+			units = addResolvePackPointers(units, cwd, r.out, &extra)
+		}
 		for i := range units {
 			if units[i].src.SourceType == SourceTypeWellKnown {
 				if err := units[i].skill.LoadWellKnown(); err != nil {
@@ -1474,7 +1639,7 @@ func RunAddParsed(p ParsedAddCLI, aio AddIO) int {
 				r.results = append(r.results, AddJSONResult{Name: name, Status: "failed", Error: msg})
 				continue
 			}
-			entry := AddJSONResult{Name: name, Status: "installed", Source: addJSONSource(u.src), Mode: mode}
+			entry := AddJSONResult{Name: name, Status: "installed", Source: addJSONSource(u.src), Mode: mode, Fallback: u.src.BlobFallback}
 			if u.src.Ref != "" {
 				ref := u.src.Ref
 				entry.Ref = &ref

@@ -2,7 +2,7 @@
 
 `skl` is a fast, self-contained CLI tool for managing Agent Skills, written in Go.
 
-This project is a Go port of the original [`skills`](https://www.npmjs.com/package/skills) TypeScript package (commonly run via `npx skills`). It tracks upstream [vercel-labs/skills](https://github.com/vercel-labs/skills) v1.7.6 command for command and flag for flag. The skl version mirrors the upstream release it tracks, with the major version set to 0: skills 1.7.6 is skl 0.7.6. It is a single static binary, so there is no `node_modules` to audit and no NPM supply chain to worry about.
+This project is a Go port of the original [`skills`](https://www.npmjs.com/package/skills) TypeScript package (commonly run via `npx skills`). It tracks upstream [vercel-labs/skills](https://github.com/vercel-labs/skills) v1.9.0 command for command and flag for flag. The skl version mirrors the upstream release it tracks, with the major version set to 0: skills 1.9.0 is skl 0.9.0. It is a single static binary, so there is no `node_modules` to audit and no NPM supply chain to worry about.
 
 ## Why Go?
 
@@ -113,6 +113,7 @@ Add Options:
   -l, --list                       List the skills in the source without installing.
   -y, --yes                        Skip confirmation prompts.
   --copy                           Copy files instead of symlinking agent directories.
+  --rename <name>                  Install the one selected skill under a new name.
   --subagent <names...>            Install to Eve subagents ('root' for the root agent).
   --all                            Shorthand for --skill '*' --agent '*' -y.
   --full-depth                     Search all subdirectories even when a root SKILL.md exists.
@@ -264,7 +265,7 @@ The configuration file is `$XDG_CONFIG_HOME/skills/config.json` (`~/.config/skil
 `skl` covers the full upstream command set:
 *   **Flexible sources**: Install from local folders, `owner/repo` shorthands, GitHub, GitLab, and Azure DevOps URLs (branch, tag, or commit pinned), SSH remotes, direct `SKILL.md` links, `.zip` and `.tar.gz` archives, `.well-known/skills` endpoints, skills.sh short names, and Notion pages through the `ntn` CLI.
 *   **Zero-overhead linking**: Symlinks skills into each agent's directory by default, so one copy serves every agent. Use `--copy` for independent physical copies.
-*   **Lockfile**: `skills-lock.json` records every install with its source and content hash, so `install`, `check`, and `update` know what changed.
+*   **Lockfile**: `skills-lock.json` records every install with its source, Git commit (when available), and content hash, so `install` restores the pinned commit while `check` and `update` track upstream changes. Skills installed with `--rename` keep their chosen name through updates, restores, and `list`.
 *   **Agent targeting**: Pass `-a` with one or more agents, or `*` for all of them. Skills can also be scoped to Eve subagents with `--subagent`.
 *   **Machine output**: `--json` on `add`, `list`, `find`, and `sync` prints one JSON value with no ANSI codes.
 *   **Safety checks**: Directory-traversal protection on every path, symlink confinement when copying skill folders, terminal-escape stripping on skill metadata before it is printed, and size limits on archives.

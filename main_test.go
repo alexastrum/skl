@@ -78,13 +78,13 @@ func writeSkill(t *testing.T, dir, name string) {
 func TestVersion(t *testing.T) {
 	for _, flag := range []string{"--version", "-v", "version"} {
 		r := runCLI(t, t.TempDir(), nil, flag)
-		if r.code != 0 || r.stdout != "0.8.1\n" {
+		if r.code != 0 || r.stdout != "0.9.0\n" {
 			t.Errorf("%s: code=%d stdout=%q", flag, r.code, r.stdout)
 		}
 	}
 	// -v after a subcommand means --verbose, not version.
 	r := runCLI(t, t.TempDir(), nil, "update", "-v", "-p", "-y")
-	if strings.TrimSpace(r.stdout) == "0.8.1" {
+	if strings.TrimSpace(r.stdout) == "0.9.0" {
 		t.Error("update -v must not print the version")
 	}
 }

@@ -1606,6 +1606,9 @@ type Skill struct {
 	RawContent  string                 `json:"rawContent,omitempty"`
 	PluginName  string                 `json:"pluginName,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	// RenamedFrom is the name the source publishes this skill under, set when it is
+	// installed under another name (`add --rename`). Name is then the installed name.
+	RenamedFrom string `json:"renamedFrom,omitempty"`
 }
 
 // ParsedSource represents a parsed skill installation source (matching upstream ParsedSource).
@@ -1686,6 +1689,7 @@ type AddOptions struct {
 	FullDepth   bool
 	All         bool
 	JSON        bool
+	Rename      string
 	Subagent    []string
 	Metadata    string
 	DryRun      bool

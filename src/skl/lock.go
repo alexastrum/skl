@@ -2,6 +2,7 @@ package skl
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,9 +14,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -30,15 +33,17 @@ var ErrInvalidLocalLock = errors.New("SKILLS_INVALID_LOCAL_LOCK")
 
 // SkillLockEntry represents a single installed skill entry in the global lock file (.skill-lock.json).
 // Field order is the JSON key order upstream writes: addSkillToLock spreads the caller's entry
-// ({source, sourceType, sourceUrl, ref, skillPath, skillFolderHash, pluginName, sourceBaseUrl,
-// wellKnownDigest, installMode}) and then appends installedAt and updatedAt, so the timestamps
-// always come last.
+// ({source, sourceType, sourceUrl, ref, commit, skillPath, skillName, skillFolderHash, pluginName,
+// sourceBaseUrl, wellKnownDigest, installMode}) and then appends installedAt and updatedAt, so the
+// timestamps always come last.
 type SkillLockEntry struct {
 	Source          string `json:"source"`
 	SourceType      string `json:"sourceType"`
 	SourceUrl       string `json:"sourceUrl"`
 	Ref             string `json:"ref,omitempty"`
+	Commit          string `json:"commit,omitempty"`
 	SkillPath       string `json:"skillPath,omitempty"`
+	SkillName       string `json:"skillName,omitempty"`
 	SkillFolderHash string `json:"skillFolderHash"`
 	PluginName      string `json:"pluginName,omitempty"`
 	SourceBaseUrl   string `json:"sourceBaseUrl,omitempty"`
@@ -80,11 +85,13 @@ type LocalSkillLockEntry struct {
 	Source          string   `json:"source"`
 	SourceUrl       string   `json:"sourceUrl,omitempty"`
 	Ref             string   `json:"ref,omitempty"`
+	Commit          string   `json:"commit,omitempty"`
 	SourceType      string   `json:"sourceType"`
 	SkillPath       string   `json:"skillPath,omitempty"`
 	Version         string   `json:"version,omitempty"`
 	Via             string   `json:"via,omitempty"`
 	ComputedHash    string   `json:"computedHash"`
+	SkillName       string   `json:"skillName,omitempty"`
 	Subagents       []string `json:"subagents,omitempty"`
 	WellKnownDigest string   `json:"wellKnownDigest,omitempty"`
 	InstallMode     string   `json:"installMode,omitempty"`
@@ -628,17 +635,107 @@ func getPortableLocalSource(source, lockDir string) string {
 	return "./" + portable
 }
 
-// WriteLocalLock writes the local project lock file with deterministically sorted skill keys
-// and trailing newline, returning an error if writing fails (#2606).
-func WriteLocalLock(lock LocalSkillLockFile, cwd string) error {
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-	path := GetLocalLockPath(cwd)
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("create directory %s: %w", filepath.Dir(path), err)
-	}
+// The lock is held only for one read and one write, so a lock older than
+// localLockStaleAge was left by a crashed process. It must be shorter than
+// localLockAcquireTimeout, or a waiter gives up before it may break the stale lock (#2750).
+var (
+	localLockAcquireTimeout = 10 * time.Second
+	localLockStaleAge       = 5 * time.Second
+)
 
+func lockRandomHex(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func lockJitterMs(max int) int {
+	var b [1]byte
+	_, _ = rand.Read(b[:])
+	return int(b[0]) % max
+}
+
+// breakStaleLock removes a stale companion lock file without removing a live one (#2750).
+// Moving it to a unique name lets only one waiter claim it; if another waiter broke it
+// first and a new holder took the lock in between, the moved file is that live lock and
+// is linked back.
+func breakStaleLock(mutexPath string, stale os.FileInfo) {
+	claimed := fmt.Sprintf("%s.%d.%s.stale", mutexPath, os.Getpid(), lockRandomHex(6))
+	if err := os.Rename(mutexPath, claimed); err != nil {
+		return
+	}
+	if moved, err := os.Stat(claimed); err == nil && !moved.ModTime().Equal(stale.ModTime()) {
+		_ = os.Link(claimed, mutexPath)
+	}
+	_ = os.Remove(claimed)
+}
+
+// withLocalLock serializes local lockfile mutations both in-process and across OS processes
+// using an exclusive companion lock file (#2750).
+func withLocalLock(lockPath string, fn func() error) error {
+	absPath, err := filepath.Abs(lockPath)
+	if err != nil {
+		absPath = filepath.Clean(lockPath)
+	}
+	mutexPath := absPath + ".lock"
+	if err := os.MkdirAll(filepath.Dir(mutexPath), 0o755); err != nil {
+		return fmt.Errorf("create directory %s: %w", filepath.Dir(mutexPath), err)
+	}
+	deadline := time.Now().Add(localLockAcquireTimeout)
+	for {
+		f, err := os.OpenFile(mutexPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o666)
+		if err == nil {
+			_ = f.Close()
+			break
+		}
+		if !os.IsExist(err) {
+			return err
+		}
+		if st, statErr := os.Stat(mutexPath); statErr == nil && time.Since(st.ModTime()) > localLockStaleAge {
+			breakStaleLock(mutexPath, st)
+			continue
+		}
+		if !time.Now().Before(deadline) {
+			return ErrLocalLockBusy(mutexPath, err)
+		}
+		time.Sleep(time.Duration(10+lockJitterMs(15)) * time.Millisecond)
+	}
+	defer func() { _ = os.Remove(mutexPath) }()
+	return fn()
+}
+
+func isRetryableRenameErr(err error) bool {
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EBUSY) {
+		return true
+	}
+	// On Windows, ERROR_SHARING_VIOLATION (32) and ERROR_LOCK_VIOLATION (33)
+	// correspond to Node's EBUSY when another process briefly holds the file.
+	var errno syscall.Errno
+	if errors.As(err, &errno) && (errno == 32 || errno == 33) {
+		return true
+	}
+	return false
+}
+
+func renameWithWindowsRetry(src, dest string) error {
+	maxAttempts := 1
+	if runtime.GOOS == "windows" {
+		maxAttempts = 5
+	}
+	for attempt := 1; ; attempt++ {
+		err := os.Rename(src, dest)
+		if err == nil {
+			return nil
+		}
+		if attempt < maxAttempts && isRetryableRenameErr(err) {
+			time.Sleep(time.Duration(attempt*15) * time.Millisecond)
+			continue
+		}
+		return err
+	}
+}
+
+func writeLocalLockUnlocked(lock LocalSkillLockFile, cwd, path string) error {
 	normalizedSkills := make(map[string]LocalSkillLockEntry, len(lock.Skills))
 	for k, entry := range lock.Skills {
 		if entry.SourceType == "local" && entry.Source != "" {
@@ -659,36 +756,77 @@ func WriteLocalLock(lock LocalSkillLockFile, cwd string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+
+	// Preserve write-permission errors on read-only lock files across POSIX (where rename
+	// mutates the parent directory rather than checking target file permissions).
+	if f, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
+		_ = f.Close()
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("write local lock %s: %w", path, err)
+	}
+
+	tempPath := fmt.Sprintf("%s.%d.%s.tmp", path, os.Getpid(), lockRandomHex(6))
+	if err := os.WriteFile(tempPath, data, 0o666); err != nil {
+		return fmt.Errorf("write local lock %s: %w", path, err)
+	}
+	if err := renameWithWindowsRetry(tempPath, path); err != nil {
+		_ = os.Remove(tempPath)
 		return fmt.Errorf("write local lock %s: %w", path, err)
 	}
 	return nil
 }
 
-// AddSkillToLocalLock adds or updates a skill in the local project lock file.
-func AddSkillToLocalLock(skillName string, entry LocalSkillLockEntry, cwd string) error {
-	lock, err := ReadLocalLock(cwd)
-	if err != nil {
-		return err
+// WriteLocalLock writes the local project lock file with deterministically sorted skill keys,
+// serialized and atomically replaced (#2606, #2750).
+func WriteLocalLock(lock LocalSkillLockFile, cwd string) error {
+	if cwd == "" {
+		cwd, _ = os.Getwd()
 	}
-	lock.Skills[skillName] = entry
-	return WriteLocalLock(lock, cwd)
+	path := GetLocalLockPath(cwd)
+	return withLocalLock(path, func() error {
+		return writeLocalLockUnlocked(lock, cwd, path)
+	})
 }
 
-// RemoveSkillFromLocalLock removes a skill from the local project lock file.
+// AddSkillToLocalLock adds or updates a skill in the local project lock file under the lock (#2750).
+func AddSkillToLocalLock(skillName string, entry LocalSkillLockEntry, cwd string) error {
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	path := GetLocalLockPath(cwd)
+	return withLocalLock(path, func() error {
+		lock, err := ReadLocalLock(cwd)
+		if err != nil {
+			return err
+		}
+		lock.Skills[skillName] = entry
+		return writeLocalLockUnlocked(lock, cwd, path)
+	})
+}
+
+// RemoveSkillFromLocalLock removes a skill from the local project lock file under the lock (#2750).
 func RemoveSkillFromLocalLock(skillName string, cwd string) (bool, error) {
-	lock, err := ReadLocalLock(cwd)
-	if err != nil {
-		return false, err
+	if cwd == "" {
+		cwd, _ = os.Getwd()
 	}
-	if _, ok := lock.Skills[skillName]; !ok {
-		return false, nil
-	}
-	delete(lock.Skills, skillName)
-	if err := WriteLocalLock(lock, cwd); err != nil {
-		return false, err
-	}
-	return true, nil
+	path := GetLocalLockPath(cwd)
+	removed := false
+	err := withLocalLock(path, func() error {
+		lock, err := ReadLocalLock(cwd)
+		if err != nil {
+			return err
+		}
+		if _, ok := lock.Skills[skillName]; !ok {
+			return nil
+		}
+		delete(lock.Skills, skillName)
+		if err := writeLocalLockUnlocked(lock, cwd, path); err != nil {
+			return err
+		}
+		removed = true
+		return nil
+	})
+	return removed, err
 }
 
 // LockChangeReason explains why recording entry for skillName would mutate skills-lock.json,
@@ -826,9 +964,18 @@ func isWithinSkillRoot(root, candidate string) bool {
 // ComputeSkillFolderHash computes the portable v2 SHA-256 hash of a skill directory (#2685),
 // matching computeSkillFolderHash in upstream src/skill-hash.ts.
 func ComputeSkillFolderHash(skillDir string) (string, error) {
-	root, err := filepath.EvalSymlinks(skillDir)
+	files, err := CollectSkillFolderFiles(skillDir)
 	if err != nil {
 		return "", err
+	}
+	return HashSkillFiles(files), nil
+}
+
+// CollectSkillFolderFiles returns the files ComputeSkillFolderHash hashes for skillDir (#2722).
+func CollectSkillFolderFiles(skillDir string) ([]HashedFile, error) {
+	root, err := filepath.EvalSymlinks(skillDir)
+	if err != nil {
+		return nil, err
 	}
 	if abs, err := filepath.Abs(root); err == nil {
 		root = abs
@@ -903,9 +1050,9 @@ func ComputeSkillFolderHash(skillDir string) (string, error) {
 		return nil
 	}
 	if err := collect(root, "", map[string]bool{}); err != nil {
-		return "", err
+		return nil, err
 	}
-	return HashSkillFiles(files), nil
+	return files, nil
 }
 
 // ComputeLegacySkillFolderHash computes the legacy lock v1 SHA-256 hash used only to verify

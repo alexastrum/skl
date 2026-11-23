@@ -12,13 +12,13 @@ import (
 )
 
 // upstreamVersion is the vercel-labs/skills release that skl tracks.
-const upstreamVersion = "1.8.1"
+const upstreamVersion = "1.9.0"
 
 // version is the skl version. It mirrors upstreamVersion with the major
-// version set to 0 (skills 1.8.1 -> skl 0.8.1); TestVersionMirrorsUpstream
+// version set to 0 (skills 1.9.0 -> skl 0.9.0); TestVersionMirrorsUpstream
 // enforces this. It is a var so release builds can set it with
 // -ldflags "-X main.version=...".
-var version = "0.8.1"
+var version = "0.9.0"
 
 var (
 	reset = "\x1b[0m"
@@ -131,6 +131,7 @@ Add Options:
   -l, --list                       List the skills in the source without installing.
   -y, --yes                        Skip confirmation prompts.
   --copy                           Copy files instead of symlinking agent directories.
+  --rename <name>                  Install the one selected skill under a new name.
   --subagent <names...>            Install to Eve subagents ('root' for the root agent).
   --all                            Shorthand for --skill '*' --agent '*' -y.
   --full-depth                     Search all subdirectories even when a root SKILL.md exists.
@@ -229,6 +230,7 @@ Flags:
   -l, --list               List the skills in the source without installing.
   -y, --yes                Skip interactive prompts and accept defaults.
   --copy                   Copy skill files instead of creating symbolic links.
+  --rename <name>          Install the one selected skill under a new name.
   --subagent <names...>    Install to Eve subagents ('root' for the root agent).
   --all                    Shorthand for --skill '*' --agent '*' -y.
   --full-depth             Search all subdirectories even when a root SKILL.md exists.
