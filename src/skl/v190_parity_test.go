@@ -95,18 +95,29 @@ func v190FileURL(p string) string {
 
 func v190HermeticEnv(t *testing.T, home string) {
 	t.Helper()
+	// Registered first so it runs last, after t.Setenv restores the environment.
+	t.Cleanup(RefreshAgents)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".state"))
+	t.Setenv("XDG_DATA_HOME", "")
 	t.Setenv("NO_COLOR", "1")
 	t.Setenv("FORCE_COLOR", "")
-	t.Setenv("CI", "")
-	for _, k := range []string{"CLAUDECODE", "CODEX_THREAD_ID", "CURSOR_AGENT", "GEMINI_CLI", "ANTIGRAVITY_AGENT"} {
+	for _, k := range []string{
+		"CODEX_HOME", "CLAUDE_CONFIG_DIR", "VIBE_HOME", "HERMES_HOME", "AUTOHAND_HOME",
+		"GROK_HOME", "SARVAM_HOME", "REASONIX_HOME", "APPDATA", "FLATPAK_XDG_CONFIG_HOME",
+		// Agent detection.
+		"AI_AGENT", "CURSOR_TRACE_ID", "CURSOR_AGENT", "CURSOR_EXTENSION_HOST_ROLE", "GEMINI_CLI",
+		"CODEX_SANDBOX", "CODEX_CI", "CODEX_THREAD_ID", "ANTIGRAVITY_AGENT",
+		"AUGMENT_AGENT", "OPENCODE_CLIENT", "CLAUDECODE", "CLAUDE_CODE", "CLAUDE_CODE_IS_COWORK",
+		"REPL_ID", "COPILOT_MODEL", "COPILOT_ALLOW_ALL", "COPILOT_GITHUB_TOKEN",
+		// CI detection.
+		"CI", "GITHUB_ACTIONS", "GITLAB_CI", "CIRCLECI", "TRAVIS", "BUILDKITE", "JENKINS_URL", "TEAMCITY_VERSION",
+	} {
 		t.Setenv(k, "")
 	}
 	RefreshAgents()
-	t.Cleanup(RefreshAgents)
 }
 
 func TestV190_LockCommitPin_ProjectAndGlobal(t *testing.T) {
@@ -367,7 +378,7 @@ func TestV190_AddRename_Lifecycle(t *testing.T) {
 		home = filepath.Join(root, "home")
 		_ = os.MkdirAll(repo, 0o755)
 		_ = os.MkdirAll(filepath.Join(project, ".claude"), 0o755)
-		_ = os.MkdirAll(home, 0o755)
+		_ = os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
 		v190HermeticEnv(t, home)
 
 		writeUpstream = func(name, body string) {
@@ -475,7 +486,7 @@ func TestV190_AddRename_Lifecycle(t *testing.T) {
 		}
 		updated := readText(t, claudeBeta)
 		if !strings.Contains(updated, "name: beta\n") || !strings.Contains(updated, "# alpha v2") {
-			t.Fatalf("updated SKILL.md = %q", updated)
+			t.Fatalf("updated SKILL.md = %q (out=%q err=%q)", updated, cout.String(), cerr.String())
 		}
 		if _, err := os.Stat(filepath.Join(project, ".claude", "skills", "alpha")); !os.IsNotExist(err) {
 			t.Error("alpha should still not exist after update")
