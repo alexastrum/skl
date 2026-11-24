@@ -2,7 +2,7 @@
 
 `skl` supports 79 agent environments (see `AllAgentTypes` in `src/skl/types.go`). It evaluates the local filesystem and environment variables to detect installed agents, routing and linking skills dynamically.
 
-We track the original TypeScript `skills` npm package (vercel-labs/skills v1.8.1) command for command, flag for flag, and platform for platform. The skl version mirrors the tracked upstream release with the major version set to 0 (skills 1.8.1 is skl 0.8.1). When you sync with a new upstream release, bump both `upstreamVersion` and `version` in `main.go`; `TestVersionMirrorsUpstream` fails if they drift. The intentional divergences are listed at the end of this file; everything else should match upstream byte for byte where output is compared (lockfiles, diagnostics, `--json`).
+We track the original TypeScript `skills` npm package (vercel-labs/skills v1.9.0) command for command, flag for flag, and platform for platform. The skl version mirrors the tracked upstream release with the major version set to 0 (skills 1.9.0 is skl 0.9.0). When you sync with a new upstream release, bump both `upstreamVersion` and `version` in `main.go`; `TestVersionMirrorsUpstream` fails if they drift. The intentional divergences are listed at the end of this file; everything else should match upstream byte for byte where output is compared (lockfiles, diagnostics, `--json`).
 
 ### Antigravity mapping
 
@@ -93,7 +93,7 @@ For Windows platforms, compiling natively in CI or cross-compiling on macOS/Linu
 
 Each of these is marked with an `// Intentional divergence:` comment at the point in the code where it happens. Do not "fix" them back to upstream behavior without updating this list.
 
-| Area | Upstream (v1.8.1) | `skl` | Where |
+| Area | Upstream (v1.9.0) | `skl` | Where |
 | :--- | :--- | :--- | :--- |
 | Antigravity install detection | Only `~/.gemini/antigravity` marks Antigravity as installed. | `~/.gemini/config` or `~/.gemini/antigravity` does. | `types.go` (`antigravity.DetectInstalled`) |
 | Terminal escape stripping | `CONTROL_RE` leaves a lone `ESC` (0x1b) in place. | `StripTerminalEscapes` also removes a lone `ESC`, since it can still start a sequence in the terminal that prints it. | `types.go` |
@@ -109,3 +109,4 @@ Known approximations rather than divergences:
 
 *   Lock v2 hashes (`ComputeSkillFolderHash`, `HashSkillFiles`, upstream #2685) sort paths by UTF-8 byte order and match upstream identically. Legacy lock v1 migration (`ComputeLegacySkillFolderHash`) and the `add` skill picker sort with `golang.org/x/text/collate` (root collation, Unicode 6.2 / CLDR 23 tables), while Node 24 `localeCompare` uses ICU 78 (Unicode 17, CLDR 48). Against Node 24.16 on 72.8M string pairs, the order agrees for 100% of ASCII pairs and 98.1% of non-ASCII pairs (`lock_test.go` pins examples of each difference). The differences: emoji newer than Unicode 6.2 (such as 🦀 and 🫠) sort after all letters instead of with the other symbols; Han characters outside the main CJK block sort by block instead of radical-stroke order; Node treats digits from other scripts (٠, ০, ๐) as equal to ASCII digits, x/text sorts them after; x/text treats ў as у with a breve, where newer CLDR makes it a separate letter; and Node sorts ’ before ‘, x/text the reverse. Paths that collate equal (NFC and NFD spellings, for example) fall back to byte order; upstream keeps directory read order for them.
 *   JSON lone surrogates decode to U+FFFD.
+*   Lockfile entries (`skills-lock.json` and `.skill-lock.json`) serialize fields in Go struct declaration order (`computedHash` before `skillName` in project locks, matching upstream for git/github/local/download installs), so well-known `skillName`, download global fields, and backfilled `commit`/`via` keys can appear in a different position than upstream's object-spread order while carrying identical JSON content.

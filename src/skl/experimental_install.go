@@ -83,20 +83,30 @@ func LinkInstalledSkills(names []string, lock LocalSkillLockFile, agents []Agent
 // restoreInstall installs the named skills of a fetched source at project scope
 // via InstallFromSource (records skills-lock.json, or with frozen verifies the
 // hashes against it and never writes the lock).
-func restoreInstall(f *FetchedSource, skills []string, agents []AgentType, frozen *LocalSkillLockFile, mode InstallMode, via, cwd string) (installed, failed []string, errMsg string) {
+func restoreInstall(f *FetchedSource, skills []string, selectFn func([]FetchedSkill) []FetchedSkill, agents []AgentType, frozen *LocalSkillLockFile, mode InstallMode, via, cwd string) (installed, failed []string, errMsg string) {
 	installMode := InstallMode("")
 	if mode == InstallModeCopy {
 		installMode = InstallModeCopy
 	}
-	res := InstallFromSource(f, InstallFromSourceOptions{Skills: skills, Agents: agents, Via: via, FrozenLock: frozen, InstallMode: installMode, Cwd: cwd})
+	res := InstallFromSource(f, InstallFromSourceOptions{Skills: skills, Select: selectFn, Agents: agents, Via: via, FrozenLock: frozen, InstallMode: installMode, Cwd: cwd})
 	return res.Installed, res.Failed, res.Error
 }
 
 type restoreGroup struct {
-	source   string
-	copy     bool
-	download bool
-	skills   []string
+	source string
+	// pinned is true when source was built with entry.Commit instead of entry.Ref;
+	// lockedRef is the branch/tag ref the lock keeps tracking (#2735).
+	pinned    bool
+	lockedRef string
+	copy      bool
+	download  bool
+	// skills holds the lock keys (installed names).
+	skills []string
+	// sourceSkills holds the upstream source names (entry.SkillName or lock key) (#2722).
+	sourceSkills []string
+	// installNames maps lowercased source name -> lock keys to install it under (#2722).
+	installNames map[string][]string
+	hasRenamed   bool
 }
 
 // RunInstallFromLock restores project skills from skills-lock.json (`skl install`
@@ -173,9 +183,18 @@ func runInstallFromLock(args []string, cwd string, stdout, stderr io.Writer) int
 				modified = append(modified, name)
 			}
 		}
-		src := BuildLocalUpdateSource(UpdateSourceFromLocal(e))
+		// A download is fetched again from its URL as-is; a Git source is fetched at its
+		// locked commit when present so upstream changes cannot break the restore (#2735).
+		pinned := e.SourceType != "download" && e.Commit != ""
+		var src string
 		if e.SourceType == "download" {
 			src = e.SourceUrl
+		} else {
+			ue := UpdateSourceFromLocal(e)
+			if e.Commit != "" {
+				ue.Ref = e.Commit
+			}
+			src = BuildLocalUpdateSource(ue)
 		}
 		if src == "" {
 			fmt.Fprintln(stderr, FormatError(ErrLockMissingSourceURL(name)))
@@ -184,14 +203,32 @@ func runInstallFromLock(args []string, cwd string, stdout, stderr io.Writer) int
 		}
 		copyMode := opts.Copy || e.InstallMode == string(InstallModeCopy)
 		download := e.SourceType == "download"
-		key := fmt.Sprintf("%v:%v:%s", copyMode, download, src)
+		pinKey := ""
+		if pinned {
+			pinKey = e.Ref
+		}
+		key := fmt.Sprintf("%v:%v:%s\n%v:%s", copyMode, download, src, pinned, pinKey)
 		g, ok := groups[key]
 		if !ok {
-			g = &restoreGroup{source: src, copy: copyMode, download: download}
+			g = &restoreGroup{
+				source:       src,
+				pinned:       pinned,
+				lockedRef:    e.Ref,
+				copy:         copyMode,
+				download:     download,
+				installNames: map[string][]string{},
+			}
 			groups[key] = g
 			groupKeys = append(groupKeys, key)
 		}
 		g.skills = append(g.skills, name)
+		sourceName := nonEmpty(e.SkillName, name)
+		g.sourceSkills = append(g.sourceSkills, sourceName)
+		lowerSource := strings.ToLower(sourceName)
+		g.installNames[lowerSource] = append(g.installNames[lowerSource], name)
+		if e.SkillName != "" {
+			g.hasRenamed = true
+		}
 	}
 
 	if len(already) > 0 {
@@ -245,7 +282,8 @@ func runInstallFromLock(args []string, cwd string, stdout, stderr io.Writer) int
 	restored := 0
 	for _, k := range groupKeys {
 		g := groups[k]
-		req := SourceRequest{Source: g.source, Skills: g.skills, Yes: true, Cwd: cwd}
+		// Fetch renamed skills by the name their source uses (#2722).
+		req := SourceRequest{Source: g.source, Skills: g.sourceSkills, Yes: true, Cwd: cwd}
 		if g.download {
 			req.Parsed = &ParsedSource{Type: "download", URL: g.source}
 			req.FullDepth = true
@@ -259,11 +297,37 @@ func runInstallFromLock(args []string, cwd string, stdout, stderr io.Writer) int
 			failedSkills = append(failedSkills, g.skills...)
 			continue
 		}
+		// Fetched at the locked commit; the lock keeps tracking the branch or tag it came from (#2735).
+		if g.pinned {
+			fetched.Ref = g.lockedRef
+			fetched.Parsed.Ref = g.lockedRef
+		}
 		mode := InstallModeSymlink
 		if g.copy {
 			mode = InstallModeCopy
 		}
-		installed, failedTargets, errMsg := restoreInstall(fetched, g.skills, targets, frozenLock, mode, "", cwd)
+		var selectFn func([]FetchedSkill) []FetchedSkill
+		if g.hasRenamed {
+			installNames := g.installNames
+			selectFn = func(found []FetchedSkill) []FetchedSkill {
+				var out []FetchedSkill
+				for _, skill := range found {
+					names := installNames[strings.ToLower(skill.Name)]
+					if len(names) == 0 {
+						names = []string{skill.Name}
+					}
+					for _, targetName := range names {
+						if strings.EqualFold(targetName, skill.Name) {
+							out = append(out, skill)
+						} else {
+							out = append(out, RenameFetchedSkill(skill, targetName))
+						}
+					}
+				}
+				return out
+			}
+		}
+		installed, failedTargets, errMsg := restoreInstall(fetched, g.sourceSkills, selectFn, targets, frozenLock, mode, "", cwd)
 		_ = fetched.Cleanup()
 		if errMsg != "" {
 			fmt.Fprintf(stderr, "Failed to restore %s from %s: %s\n", strings.Join(g.skills, ", "), g.source, errMsg)

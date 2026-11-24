@@ -377,20 +377,30 @@ type listLockEntry struct {
 	Source       string
 	SourceURL    string
 	SourceType   string
+	SkillName    string
 	PluginName   string
 	ComputedHash string
 }
 
+// renamedLabel returns " (renamed from <name>)" for a skill installed under another name (#2722).
+func renamedLabel(entry listLockEntry) string {
+	if entry.SkillName == "" {
+		return ""
+	}
+	return fmt.Sprintf(" %s(renamed from %s)%s", ansiDim, SanitizeMetadata(entry.SkillName), ansiReset)
+}
+
 // ListJSONEntry is one element of `skl list --json` output.
 type ListJSONEntry struct {
-	Name       string   `json:"name"`
-	Path       *string  `json:"path"`
-	Scope      string   `json:"scope"`
-	Agents     []string `json:"agents"`
-	Source     *string  `json:"source"`
-	SourceURL  *string  `json:"sourceUrl"`
-	SourceType *string  `json:"sourceType"`
-	Status     string   `json:"status"`
+	Name        string   `json:"name"`
+	Path        *string  `json:"path"`
+	Scope       string   `json:"scope"`
+	Agents      []string `json:"agents"`
+	Source      *string  `json:"source"`
+	SourceURL   *string  `json:"sourceUrl"`
+	SourceType  *string  `json:"sourceType"`
+	RenamedFrom *string  `json:"renamedFrom"`
+	Status      string   `json:"status"`
 }
 
 func strPtr(s string) *string { return &s }
@@ -472,7 +482,7 @@ func runList(args []string, cwd string, stdout, stderr io.Writer) int {
 	if opts.Global {
 		gl, _ := ReadSkillLock()
 		for k, e := range gl.Skills {
-			locked[k] = listLockEntry{Source: e.Source, SourceURL: e.SourceUrl, SourceType: e.SourceType, PluginName: e.PluginName}
+			locked[k] = listLockEntry{Source: e.Source, SourceURL: e.SourceUrl, SourceType: e.SourceType, SkillName: e.SkillName, PluginName: e.PluginName}
 			lockKeys = append(lockKeys, k)
 		}
 	} else {
@@ -486,7 +496,7 @@ func runList(args []string, cwd string, stdout, stderr io.Writer) int {
 		}
 		for k, e := range ll.Skills {
 			// Project lock entries carry no plugin name (upstream local-lock schema).
-			locked[k] = listLockEntry{Source: e.Source, SourceURL: e.SourceUrl, SourceType: e.SourceType, ComputedHash: e.ComputedHash}
+			locked[k] = listLockEntry{Source: e.Source, SourceURL: e.SourceUrl, SourceType: e.SourceType, SkillName: e.SkillName, ComputedHash: e.ComputedHash}
 			lockKeys = append(lockKeys, k)
 		}
 	}
@@ -562,19 +572,21 @@ func runList(args []string, cwd string, stdout, stderr io.Writer) int {
 				entry.Source = strPtr(e.Source)
 				entry.SourceURL = optStr(e.SourceURL)
 				entry.SourceType = strPtr(e.SourceType)
+				entry.RenamedFrom = optStr(e.SkillName)
 			}
 			out = append(out, entry)
 		}
 		for _, k := range missing {
 			e := locked[k]
 			out = append(out, ListJSONEntry{
-				Name:       k,
-				Scope:      scopeName,
-				Agents:     []string{},
-				Source:     strPtr(e.Source),
-				SourceURL:  optStr(e.SourceURL),
-				SourceType: strPtr(e.SourceType),
-				Status:     "missing",
+				Name:        k,
+				Scope:       scopeName,
+				Agents:      []string{},
+				Source:      strPtr(e.Source),
+				SourceURL:   optStr(e.SourceURL),
+				SourceType:  strPtr(e.SourceType),
+				RenamedFrom: optStr(e.SkillName),
+				Status:      "missing",
 			})
 		}
 		data, _ := json.MarshalIndent(out, "", "  ")
@@ -614,7 +626,7 @@ func runList(args []string, cwd string, stdout, stderr io.Writer) int {
 			}
 			sourceLabel := ansiYellow + "untracked" + ansiReset
 			if e, ok := getLock(s.Name); ok && e.Source != "" {
-				sourceLabel = SanitizeMetadata(e.Source)
+				sourceLabel = SanitizeMetadata(e.Source) + renamedLabel(e)
 			}
 			stateLabel := ""
 			if statusOf(s) == "modified" {
@@ -659,7 +671,7 @@ func runList(args []string, cwd string, stdout, stderr io.Writer) int {
 	if len(missing) > 0 {
 		fmt.Fprintf(stdout, "%sMissing%s %s(in the lock file, not on disk)%s\n", ansiBold, ansiReset, ansiDim, ansiReset)
 		for _, k := range missing {
-			fmt.Fprintf(stdout, "  %s%s%s  %sSource:%s %s\n", ansiCyan, SanitizeMetadata(k), ansiReset, ansiDim, ansiReset, SanitizeMetadata(locked[k].Source))
+			fmt.Fprintf(stdout, "  %s%s%s  %sSource:%s %s%s\n", ansiCyan, SanitizeMetadata(k), ansiReset, ansiDim, ansiReset, SanitizeMetadata(locked[k].Source), renamedLabel(locked[k]))
 		}
 		fmt.Fprintln(stdout)
 	}

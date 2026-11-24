@@ -219,13 +219,6 @@ func IsSkillInstalled(skillName string, agentType AgentType, global bool, cwd st
 	return err == nil
 }
 
-func resolveSymlinkTarget(linkPath, linkTarget string) string {
-	if filepath.IsAbs(linkTarget) {
-		return filepath.Clean(linkTarget)
-	}
-	return installAbsClean(filepath.Join(filepath.Dir(linkPath), linkTarget))
-}
-
 // FindCategoryDirSkills checks whether targetPath is a category directory: a real
 // directory without its own SKILL.md whose immediate subdirectories contain SKILL.md (#2723).
 // Returns the nested skill subdirectory names, or nil if targetPath is safe to replace.
@@ -303,9 +296,8 @@ func createSymlink(target, linkPath string) (bool, error) {
 
 	if info, err := os.Lstat(linkPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
-			if existing, err := os.Readlink(linkPath); err == nil && resolveSymlinkTarget(linkPath, existing) == resolvedTarget {
-				return true, nil
-			}
+			// A link that already resolves to target returned above, so this one points
+			// elsewhere or nowhere (#2283).
 			if err := os.Remove(linkPath); err != nil {
 				return false, nil
 			}
@@ -318,9 +310,12 @@ func createSymlink(target, linkPath string) (bool, error) {
 	if err := os.MkdirAll(linkDir, 0o755); err != nil {
 		return false, nil
 	}
-	realLinkDir := resolveParentSymlinks(linkDir)
-	if real, err := filepath.EvalSymlinks(linkDir); err == nil {
-		realLinkDir = real
+	// A relative link is resolved from the directory it physically lives in, so compute it
+	// from the fully resolved linkDir. linkDir can itself be a symlink, e.g. ~/.claude/skills
+	// pointing into a dotfiles repo (#2283).
+	realLinkDir, err := filepath.EvalSymlinks(linkDir)
+	if err != nil {
+		realLinkDir = linkDir
 	}
 	// Resolve only the target's parents: when the target is itself a link (link mode,
 	// sync), the agent link must point at it, not at whatever it points to.
@@ -649,6 +644,35 @@ func InstallSkillForAgent(skill Skill, agentType AgentType, opts InstallOptions)
 	return linkCanonicalToAgent(canonicalDir, agentDir, agentType, mode, opts, cwd, true, func(dir string) error {
 		return CopySkillDirectory(skill.Path, dir, agentType, opts.Verbose)
 	})
+}
+
+// SetInstalledSkillName sets the frontmatter `name` of an installed skill so a renamed
+// skill is invoked by its new name (#2722). path is a skill directory or Eve's flat
+// <name>.md. Symlinks are left alone: they point at a copy rewritten on its own, or at
+// the user's source (sync's link mode).
+func SetInstalledSkillName(path, name string) error {
+	stats, err := os.Lstat(path)
+	if err != nil || stats.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	file := path
+	if stats.IsDir() {
+		file = filepath.Join(path, "SKILL.md")
+	}
+	fileStats, err := os.Lstat(file)
+	if err != nil || !fileStats.Mode().IsRegular() {
+		return nil
+	}
+	rawBytes, err := os.ReadFile(file)
+	if err != nil {
+		return err
+	}
+	raw := string(rawBytes)
+	renamed := SetFrontmatterName(raw, name)
+	if renamed != raw {
+		return os.WriteFile(file, []byte(renamed), fileStats.Mode().Perm())
+	}
+	return nil
 }
 
 // linkCanonicalToAgent finishes a symlink-mode install once canonicalDir is populated.

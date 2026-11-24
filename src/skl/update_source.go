@@ -186,6 +186,12 @@ func normalizeRelocPath(p string) string {
 // only to a single same-named candidate; multiple candidates fail closed
 // (ambiguous); no candidate means the skill was deleted upstream.
 func ResolveSkillLocations(lockedSkillNames []string, lockedPaths map[string]string, discovered []DiscoveredSkillLocation, exactPathDisambiguates bool) SkillLocationResolution {
+	return ResolveSkillLocationsWithNames(lockedSkillNames, lockedPaths, nil, discovered, exactPathDisambiguates)
+}
+
+// ResolveSkillLocationsWithNames is ResolveSkillLocations with optional upstream
+// source names (lockedSourceNames[lockKey]) for skills installed with `--rename` (#2722).
+func ResolveSkillLocationsWithNames(lockedSkillNames []string, lockedPaths map[string]string, lockedSourceNames map[string]string, discovered []DiscoveredSkillLocation, exactPathDisambiguates bool) SkillLocationResolution {
 	discoveredPaths := map[string]bool{}
 	pathsByName := map[string][]string{}
 	for _, d := range discovered {
@@ -209,8 +215,13 @@ func ResolveSkillLocations(lockedSkillNames []string, lockedPaths map[string]str
 		if locked == "" {
 			continue
 		}
+		// A renamed skill is found by the name its source uses (#2722).
+		sourceName := name
+		if lockedSourceNames != nil && lockedSourceNames[name] != "" {
+			sourceName = lockedSourceNames[name]
+		}
 		normLocked := normalizeRelocPath(locked)
-		candidates := pathsByName[normalizeRelocName(name)]
+		candidates := pathsByName[normalizeRelocName(sourceName)]
 		exists := discoveredPaths[normLocked]
 		switch {
 		case exists && exactPathDisambiguates:

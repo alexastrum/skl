@@ -651,9 +651,14 @@ func PruneStaleSkills(cwd string, keep map[string]bool, keepRemote func(LocalSki
 		}
 		if hasKey {
 			delete(lock.Skills, key)
+			// Remove under the file lock: `lock` was read before sync started, so
+			// writing it back would drop entries other processes added since (#2750).
+			if _, err := RemoveSkillFromLocalLock(key, cwd); err != nil {
+				return stale, err
+			}
 		}
 	}
-	return stale, WriteLocalLock(*lock, cwd)
+	return stale, nil
 }
 
 // blockedReason explains why sync must not install name ("" when allowed): never
@@ -755,9 +760,11 @@ func requestsLockedSkill(r FieldRemoteRequest, name string, e LocalSkillLockEntr
 	if len(r.Skills) == 0 {
 		return true
 	}
+	// A renamed skill is requested by the name its source uses (#2722).
+	sourceName := nonEmpty(e.SkillName, name)
 	folder := path.Base(path.Dir(e.SkillPath))
 	for _, s := range r.Skills {
-		if SanitizeName(s) == SanitizeName(name) || s == folder {
+		if SanitizeName(s) == SanitizeName(sourceName) || s == folder {
 			return true
 		}
 	}
@@ -767,9 +774,10 @@ func requestsLockedSkill(r FieldRemoteRequest, name string, e LocalSkillLockEntr
 func isRemoteInstalled(r FieldRemoteRequest, lock LocalSkillLockFile, cwd string) bool {
 	var installed []string
 	for _, k := range keysOf(lock.Skills) {
-		if isFromRequest(lock.Skills[k], r) {
+		e := lock.Skills[k]
+		if isFromRequest(e, r) {
 			if _, err := os.Stat(GetCanonicalPath(k, false, cwd)); err == nil {
-				installed = append(installed, SanitizeName(k))
+				installed = append(installed, SanitizeName(nonEmpty(e.SkillName, k)))
 			}
 		}
 	}
@@ -1193,6 +1201,16 @@ func runSync(opts SyncOptions, cwd string, stdout, stderr io.Writer) int {
 	if frozen {
 		frozenLock = &lock
 	}
+	// A skill this request installed before under another name keeps that name (#2722).
+	renamedFor := func(r FieldRemoteRequest, sanitizedSourceName string) string {
+		for _, k := range keysOf(lock.Skills) {
+			e := lock.Skills[k]
+			if e.SkillName != "" && SanitizeName(e.SkillName) == sanitizedSourceName && isFromRequest(e, r) {
+				return k
+			}
+		}
+		return ""
+	}
 	for _, r := range remoteReqs {
 		label := projectLockSource(r.Parsed)
 		parsed := r.Parsed
@@ -1206,13 +1224,13 @@ func runSync(opts SyncOptions, cwd string, stdout, stderr io.Writer) int {
 			exit = 1
 			continue
 		}
-		var names []string
-		for _, s := range fetched.Skills {
-			name := SanitizeName(s.Name)
+		var selected []FetchedSkill
+		for _, found := range fetched.Skills {
+			sourceSanitized := SanitizeName(found.Name)
 			if len(r.Skills) > 0 {
 				wanted := false
 				for _, w := range r.Skills {
-					if strings.EqualFold(w, s.Name) || SanitizeName(w) == name || w == filepath.Base(s.Path) {
+					if strings.EqualFold(w, found.Name) || SanitizeName(w) == sourceSanitized || w == filepath.Base(found.Path) {
 						wanted = true
 					}
 				}
@@ -1220,9 +1238,14 @@ func runSync(opts SyncOptions, cwd string, stdout, stderr io.Writer) int {
 					continue
 				}
 			}
-			if !remoteAllowsSkill(r, name, opts) {
+			if !remoteAllowsSkill(r, sourceSanitized, opts) {
 				continue
 			}
+			skill := found
+			if renamed := renamedFor(r, sourceSanitized); renamed != "" {
+				skill = RenameFetchedSkill(found, renamed)
+			}
+			name := SanitizeName(skill.Name)
 			reason := ""
 			if claimed[name] {
 				reason = "another source in this sync provides it"
@@ -1235,9 +1258,9 @@ func runSync(opts SyncOptions, cwd string, stdout, stderr io.Writer) int {
 				continue
 			}
 			claimed[name] = true
-			names = append(names, s.Name)
+			selected = append(selected, skill)
 		}
-		installed, failed, errMsg := syncInstallRemote(fetched, names, targets, frozenLock, r.Via, cwd)
+		installed, failed, errMsg := syncInstallRemote(fetched, selected, targets, frozenLock, r.Via, cwd)
 		_ = fetched.Cleanup()
 		if errMsg != "" {
 			fmt.Fprintf(stderr, "Failed to install from %s: %s\n", label, errMsg)
@@ -1296,11 +1319,11 @@ func runSync(opts SyncOptions, cwd string, stdout, stderr io.Writer) int {
 }
 
 // syncInstallRemote installs remote "skills" entries and records them with via.
-func syncInstallRemote(f *FetchedSource, names []string, agents []AgentType, frozen *LocalSkillLockFile, via, cwd string) ([]string, []string, string) {
-	if len(names) == 0 {
+func syncInstallRemote(f *FetchedSource, selected []FetchedSkill, agents []AgentType, frozen *LocalSkillLockFile, via, cwd string) ([]string, []string, string) {
+	if len(selected) == 0 {
 		return nil, nil, ""
 	}
-	return restoreInstall(f, names, agents, frozen, InstallModeSymlink, via, cwd)
+	return restoreInstall(f, nil, func([]FetchedSkill) []FetchedSkill { return selected }, agents, frozen, InstallModeSymlink, via, cwd)
 }
 
 // syncStdin is where sync prompts read keys (overridable in tests).

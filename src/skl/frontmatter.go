@@ -5,12 +5,82 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 const utf8BOM = "\uFEFF"
+
+var (
+	fmSetNameRe      = regexp.MustCompile(`^(\x{FEFF}?---(\r?\n))(?s:(.*?))(\r?\n---(?:\r?\n|$))`)
+	fmLineSplitRe    = regexp.MustCompile(`\r?\n`)
+	fmNameKeyRe      = regexp.MustCompile(`^name\s*:`)
+	fmContinuationRe = regexp.MustCompile(`^[ \t]`)
+
+	// YAML 1.2 Core Schema plain-scalar patterns matching upstream `yaml` v2 stringify({ name }).
+	// yaml.v3 quotes YAML 1.1 booleans (yes/no/on/off/y/n), underscored numbers, binary/octal
+	// variants, and ISO dates, and skips quoting >64-bit hex ints; matching YAML 1.2 keeps
+	// rewritten SKILL.md bytes and computedHash identical to upstream (#2722).
+	yaml12SafePlainRe = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._-]*$`)
+	yaml12CoreTagRe   = regexp.MustCompile(`^(?:~|null|Null|NULL|true|True|TRUE|false|False|FALSE|[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$`)
+)
+
+func formatYAML12NameLine(name string) string {
+	if yaml12SafePlainRe.MatchString(name) {
+		if yaml12CoreTagRe.MatchString(name) {
+			return "name: " + strconv.Quote(name)
+		}
+		return "name: " + name
+	}
+	if marshaled, err := yaml.Marshal(map[string]string{"name": name}); err == nil {
+		return strings.TrimRight(string(marshaled), "\r\n")
+	}
+	return "name: " + strconv.Quote(name)
+}
+
+// SetFrontmatterName returns raw with its frontmatter `name` set to name, replacing the
+// existing value (including continuation lines of a multi-line scalar) or inserting it
+// first. Everything outside the name line is preserved byte for byte. Without frontmatter,
+// raw is returned unchanged (#2722).
+func SetFrontmatterName(raw, name string) string {
+	idx := fmSetNameRe.FindStringSubmatchIndex(raw)
+	if idx == nil {
+		return raw
+	}
+	wholeEnd := idx[1]
+	open := raw[idx[2]:idx[3]]
+	eol := raw[idx[4]:idx[5]]
+	body := raw[idx[6]:idx[7]]
+	closeDelim := raw[idx[8]:idx[9]]
+
+	nameLine := formatYAML12NameLine(name)
+
+	lines := fmLineSplitRe.Split(body, -1)
+	pos := -1
+	for i, line := range lines {
+		if fmNameKeyRe.MatchString(line) {
+			pos = i
+			break
+		}
+	}
+	if pos == -1 {
+		lines = append([]string{nameLine}, lines...)
+	} else {
+		end := pos + 1
+		for end < len(lines) && fmContinuationRe.MatchString(lines[end]) {
+			end++
+		}
+		updated := make([]string, 0, len(lines)-(end-pos)+1)
+		updated = append(updated, lines[:pos]...)
+		updated = append(updated, nameLine)
+		updated = append(updated, lines[end:]...)
+		lines = updated
+	}
+	return open + strings.Join(lines, eol) + closeDelim + raw[wholeEnd:]
+}
 
 // ParseFrontmatter parses YAML frontmatter delimited by `---` from a raw markdown string.
 // It matches upstream's /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/ exactly: after an
